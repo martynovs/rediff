@@ -15,6 +15,7 @@ mod comment;
 mod nav;
 mod overlays;
 mod peekview;
+mod submit;
 mod types;
 
 pub use types::*;

@@ -49,6 +49,12 @@ impl Mode {
         self.overlays.last_mut()
     }
 
+    /// The whole stack, for the rare case that needs an overlay which is not the
+    /// topmost — the thread list under an edit input being the one.
+    pub(crate) fn overlays_mut(&mut self) -> &mut [Overlay] {
+        &mut self.overlays
+    }
+
     /// Push a transient overlay onto the stack (the new topmost / active one).
     pub(crate) fn push_overlay(&mut self, overlay: Overlay) {
         self.overlays.push(overlay);
@@ -81,6 +87,8 @@ pub enum Overlay {
     Comment(CommentInput),
     /// The review's threads, with a selection.
     Threads(ThreadList),
+    /// Closing the round: pick a verdict preset, then edit its text.
+    Submit(SubmitDraft),
 }
 
 /// Which surface captures input right now, resolved by [`App::active_context`]
@@ -94,8 +102,72 @@ pub enum InputContext {
     ThemePicker,
     Comment,
     Threads,
+    Submit,
     Peek,
     Normal,
+}
+
+/// Closing a review round: a two-stage overlay.
+///
+/// Stage one picks a preset, stage two edits its text and sends. Two stages
+/// rather than one editable line with a cycle key, because cycling would have to
+/// either discard what the user typed or keep a stale preset name — and the one
+/// thing this record has to get right is that the body delivered is the body the
+/// human actually wrote.
+pub struct SubmitDraft {
+    /// The offered presets, from config or the built-ins.
+    pub presets: Vec<crate::config::VerdictPreset>,
+    /// Cursor in `presets` while picking; the chosen one once editing.
+    pub selected: usize,
+    /// `None` while picking a preset, `Some` while editing its text.
+    pub buffer: Option<String>,
+    /// Why the last send was refused, shown inside the box (the status bar hides
+    /// the flash while an overlay is up).
+    pub refusal: Option<String>,
+}
+
+impl SubmitDraft {
+    pub fn new(presets: Vec<crate::config::VerdictPreset>) -> Self {
+        Self {
+            presets,
+            selected: 0,
+            buffer: None,
+            refusal: None,
+        }
+    }
+
+    /// The preset under the cursor.
+    pub fn current(&self) -> Option<&crate::config::VerdictPreset> {
+        self.presets.get(self.selected)
+    }
+
+    /// Move the preset cursor, clamped — a preset list does not wrap.
+    pub fn move_by(&mut self, delta: isize) {
+        let last = self.presets.len().saturating_sub(1);
+        #[expect(
+            clippy::cast_possible_wrap,
+            clippy::cast_sign_loss,
+            reason = "a config's preset count is far below isize::MAX; clamped to >= 0 before the cast back"
+        )]
+        let next = (self.selected as isize + delta).clamp(0, last as isize) as usize;
+        self.selected = next;
+    }
+
+    /// Enter the editing stage, pre-filled from the selected preset.
+    pub fn begin_edit(&mut self) {
+        if let Some(p) = self.current() {
+            self.buffer = Some(p.text.clone());
+        }
+    }
+
+    /// The title, which also tells the user which stage they are in.
+    pub fn title(&self) -> String {
+        match (&self.buffer, self.current()) {
+            (Some(_), Some(p)) => format!("submit · {}", p.name),
+            (Some(_), None) => "submit".to_string(),
+            (None, _) => "close the round — pick a verdict".to_string(),
+        }
+    }
 }
 
 /// The review's live threads, with a cursor over them.
@@ -277,6 +349,11 @@ pub struct App {
     /// Commit-message popup body height (rows) from the last draw, so its scroll
     /// stops a page short of the end (the last screen stays full).
     pub commit_msg_viewport_h: usize,
+    /// Help-overlay scroll offset (top row). The key catalog outgrew an 80x24
+    /// terminal, so the box scrolls instead of clipping its last section.
+    pub help_scroll: usize,
+    /// Help-overlay visible content rows from the last draw, bounding the scroll.
+    pub help_viewport_h: usize,
     pub theme: Theme,
     /// The active theme's per-capture color table, indexed by
     /// `highlight::Paint::Capture`. Rebuilt when the theme changes; read at
@@ -297,6 +374,10 @@ pub struct App {
     /// replaying plus re-resolving on the 100 ms poll tick would re-read the log
     /// and re-split every referenced file at 10 Hz.
     pub thread_marks: std::collections::HashMap<crate::tui::rows::Key, usize>,
+    /// Verdict presets offered when closing a round. Seeded with the built-ins
+    /// so every constructor has a usable set, and replaced from `config.toml` in
+    /// `tui::run`.
+    pub verdicts: Vec<crate::config::VerdictPreset>,
     /// Whether the launch view was narrowed by path filters. Only the launch
     /// view can be: every pushed view loads a whole target. A round hashed over
     /// a subset would make the next unfiltered `rediff request` report every

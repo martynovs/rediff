@@ -156,7 +156,24 @@ cost of being invoked once per file.
 ## Configuration
 
 `rediff` reads `~/.config/rediff/config.toml` for defaults (e.g. layout mode and theme);
-CLI flags override it. Missing or partial configs fall back to built-in defaults.
+CLI flags override it. Missing or partial configs fall back to built-in defaults, and each
+key is read on its own — a value `rediff` cannot parse costs you that key, not the file.
+
+`[[verdict]]` entries are the parting instructions offered when you close a review round
+with `y`; the chosen text is editable before it is sent. Declaring none keeps the built-ins.
+
+```toml
+theme = "Nord"
+mode = "stack"
+
+[[verdict]]
+name = "approve"
+text = "looks good — nothing blocking"
+
+[[verdict]]
+name = "rework"
+text = "address the review points above, then show me again"
+```
 
 ## License
 

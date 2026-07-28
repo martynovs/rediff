@@ -174,19 +174,43 @@ pub fn ensure_review(
     Ok(Opening { opened, round })
 }
 
+/// Append a record superseding thread `id`, with `edit` applied to a copy of it.
+///
+/// Reading the stored thread back and mutating a *copy* is what makes edit,
+/// retract and resolve one operation: every field the caller does not touch —
+/// the anchor, the suggested replacement, the other flag — carries forward by
+/// construction. Building a fresh `Thread` at each call site is how a resolved
+/// comment silently un-resolves the moment its text is edited.
+///
+/// `Ok(false)` means the log has no such thread; nothing is written.
+pub fn supersede(
+    log: &Log,
+    id: &str,
+    edit: impl FnOnce(&mut crate::review::Thread),
+) -> io::Result<bool> {
+    let st = log.state()?;
+    let Some(found) = st.threads.get(id) else {
+        return Ok(false);
+    };
+    let mut thread = found.thread.clone();
+    edit(&mut thread);
+    // The superseding record's own write time, not the original's.
+    thread.at = crate::review::now();
+    log.append(&crate::review::Record::Thread(thread))?;
+    Ok(true)
+}
+
 /// One thread as the TUI shows it: its record plus where it sits *now*.
 #[derive(Debug, Clone)]
 pub struct LiveThread {
     /// Superseding a thread means reusing its id, so edit/retract/resolve all
-    /// need this. Nothing reads it until those land — and the expectation will
-    /// fail the zero-warning gate the moment they do, which is the point.
-    #[expect(
-        dead_code,
-        reason = "the handle edit/retract/resolve will supersede by; unread until then"
-    )]
+    /// go through this.
     pub id: String,
     pub body: String,
     pub resolved: bool,
+    /// Retracted: withdrawn from delivery, still on disk, and still listed so
+    /// the retraction can be undone. Nothing else shows it.
+    pub deleted: bool,
     /// Where the anchor lands in the current changeset. `None` for a
     /// review-level comment, which has no anchor to resolve.
     pub placement: Option<Resolution>,
@@ -204,26 +228,31 @@ impl LiveThread {
     /// their code is gone would be the alarming lie that variant exists to
     /// prevent.
     pub fn state_label(&self) -> &'static str {
-        match (&self.placement, self.resolved) {
-            (_, true) => "resolved",
-            (None, _) => "review",
-            (Some(Resolution::Attached { .. }), _) => "here",
-            (Some(Resolution::Shifted { .. }), _) => "moved",
-            (Some(Resolution::Detached), _) => "detached",
-            (Some(Resolution::Unresolved), _) => "loading",
+        match (&self.placement, self.resolved, self.deleted) {
+            // Retraction outranks everything: it is the one state that changes
+            // whether the thread is delivered at all.
+            (_, _, true) => "retracted",
+            (_, true, _) => "resolved",
+            (None, ..) => "review",
+            (Some(Resolution::Attached { .. }), ..) => "here",
+            (Some(Resolution::Shifted { .. }), ..) => "moved",
+            (Some(Resolution::Detached), ..) => "detached",
+            (Some(Resolution::Unresolved), ..) => "loading",
         }
     }
 }
 
-/// The review's live threads, resolved against `cs`, in record order.
+/// The review's threads, resolved against `cs`, in record order.
 ///
-/// Deleted threads are dropped: retracted feedback is not shown, though it stays
-/// on disk. Resolved ones are kept and flagged — resolving marks a thread done,
-/// it does not hide it.
+/// Retracted threads are **included**, flagged `deleted`. They are not delivered
+/// and carry no gutter mark, but listing them is what makes `x` reversible: a
+/// list that dropped them the instant they were retracted would turn one
+/// keystroke into a comment the human can never get back from inside rediff.
+/// Resolved ones are kept and flagged too — resolving marks a thread done, it
+/// does not hide it.
 pub fn live_threads(st: &ReviewState, cs: &Changeset) -> Vec<LiveThread> {
     st.threads
         .values()
-        .filter(|t| !t.thread.deleted)
         .map(|t| {
             let a = t.thread.anchor.as_ref();
             let placement = a.map(|a| resolve(a, cs));
@@ -234,6 +263,7 @@ pub fn live_threads(st: &ReviewState, cs: &Changeset) -> Vec<LiveThread> {
                 id: t.thread.id.clone(),
                 body: t.thread.body.clone(),
                 resolved: t.thread.resolved,
+                deleted: t.thread.deleted,
                 placement,
                 path: a.map(|a| a.path.clone()),
                 key,
@@ -247,10 +277,13 @@ pub fn live_threads(st: &ReviewState, cs: &Changeset) -> Vec<LiveThread> {
 /// Keyed on `(file index, side, line)` — the cursor's own key type — rather than
 /// on the path, so the renderer's per-row lookup allocates nothing. Resolving
 /// path to index happens once here instead of once per drawn row per frame.
+///
+/// Retracted threads are skipped: the gutter marks lines that still have
+/// something to say.
 pub fn thread_index(threads: &[LiveThread], cs: &Changeset) -> HashMap<Key, usize> {
     let index_of = |path: &str| cs.files.iter().position(|f| f.path == path);
     let mut ix: HashMap<Key, usize> = HashMap::new();
-    for t in threads {
+    for t in threads.iter().filter(|t| !t.deleted) {
         if let Some((path, side, line)) = t.key.as_ref() {
             if let Some(fi) = index_of(path) {
                 *ix.entry((fi, *side, *line)).or_default() += 1;

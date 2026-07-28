@@ -102,6 +102,8 @@ impl App {
             mode: Mode::normal(),
             peek_viewport_h: 1,
             commit_msg_viewport_h: 1,
+            help_scroll: 0,
+            help_viewport_h: 1,
             theme,
             syntax,
             sidebar_area: Rect::default(),
@@ -109,6 +111,7 @@ impl App {
             flash: None,
             review_log: None,
             thread_marks: std::collections::HashMap::new(),
+            verdicts: crate::config::Config::default().verdicts(),
             launch_filtered: false,
             should_quit: false,
         }

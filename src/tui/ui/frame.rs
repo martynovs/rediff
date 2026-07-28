@@ -162,6 +162,11 @@ fn reconcile(app: &mut App, geo: &Geometry) {
         // Inner height (minus the box borders) bounds the peek's page scrolling.
         app.peek_viewport_h = geo.body.height.saturating_sub(2) as usize;
     }
+    if app.help_open() {
+        // Same box math the painter uses, so the scroll clamp cannot drift from
+        // what is actually drawn.
+        app.help_viewport_h = super::overlays::help_body_rows(geo.body);
+    }
     if app.commit_msg_open() {
         // The popup's visible body rows, derived from the same box math the
         // painter uses (one geometry source, so the "stop a page short" scroll
@@ -205,6 +210,9 @@ pub fn paint(frame: &mut Frame, app: &App, geo: &Geometry) {
     }
     if app.thread_list().is_some() {
         super::overlays::draw_threads(frame, geo.body, app);
+    }
+    if app.submit_draft().is_some() {
+        super::overlays::draw_submit(frame, geo.body, app);
     }
     if app.comment_input_state().is_some() {
         super::overlays::draw_comment(frame, geo.body, app);
@@ -302,6 +310,9 @@ fn status_info(app: &App) -> String {
         InputContext::Comment => app
             .comment_input_state()
             .map_or_else(String::new, |c| format!(" {} ", c.title())),
+        InputContext::Submit => app
+            .submit_draft()
+            .map_or_else(String::new, |d| format!(" {} ", d.title())),
         // Help never reaches here (draw_status early-returns for it); the
         // palette / theme picker overlay the base, whose counters stay shown.
         InputContext::Help

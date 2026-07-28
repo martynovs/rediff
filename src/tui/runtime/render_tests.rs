@@ -863,6 +863,80 @@ fn the_gutter_marks_a_commented_line_and_the_list_renders() {
 }
 
 #[test]
+fn the_submit_box_renders_both_stages() {
+    let cs = big_sample();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::with_launch(
+        &cs,
+        LayoutMode::Stack,
+        crate::tui::theme::ThemeName::Dark,
+        Some(dir.path().to_path_buf()),
+        crate::tui::ViewKind::Local,
+        true,
+        None,
+        Some(crate::git::LoadRequest::Staged),
+    );
+    app.attach_review_log(Some(crate::review::Log::at_worktree(dir.path())), false);
+    app.verdicts = vec![crate::config::VerdictPreset {
+        name: "rework".into(),
+        text: "another pass please".into(),
+    }];
+    let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+    for c in "MYCOMMENT".chars() {
+        handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    let text = |term: &Terminal<TestBackend>| {
+        let buf = term.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..20u16 {
+            for x in 0..100u16 {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    };
+
+    // Editing pushes the input over the list and its title says so.
+    handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+    handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    let out = text(&term);
+    assert!(out.contains("edit review comment"), "{out}");
+    assert!(out.contains("MYCOMMENT"), "pre-filled with the text: {out}");
+
+    // Esc returns to the list, which is drawn again — not to the diff.
+    handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    assert!(
+        text(&term).contains("review points"),
+        "Esc from an edit lands back on the list it was opened from"
+    );
+    handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+    // Stage one lists the presets; stage two shows the editable instruction.
+    handle_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    let out = text(&term);
+    assert!(out.contains("pick a verdict"), "{out}");
+    assert!(out.contains("another pass please"), "the preset is listed");
+
+    handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    for c in "TAIL".chars() {
+        handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    let out = text(&term);
+    assert!(out.contains("submit"), "titled with the stage: {out}");
+    assert!(out.contains("another pass pleaseTAIL"), "editable: {out}");
+}
+
+#[test]
 fn wrap_mode_draws_no_cursor_marker() {
     // One plan row spends several drawn lines under `wrap`, so `cursor_row -
     // scroll` stops being the drawn line. A marker placed by that arithmetic
@@ -1076,9 +1150,69 @@ fn help_overlay_toggles_and_renders() {
     );
     assert!(out.contains("review commit"), "help lists R (promote)");
 
-    // Any key dismisses it.
+    // Any key *other than* a scroll key dismisses it; j/k scroll, because the
+    // catalog no longer fits an 80x24 terminal.
     handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+    assert!(app.help_open(), "j scrolls rather than closing");
+    handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
     assert!(!app.help_open());
+}
+
+#[test]
+fn the_help_box_scrolls_when_the_catalog_does_not_fit() {
+    let cs = sample();
+    let mut app = App::new(&cs);
+    let (tw, th) = (80u16, 24u16);
+    let mut term = Terminal::new(TestBackend::new(tw, th)).unwrap();
+    let text = |term: &Terminal<TestBackend>| {
+        let buf = term.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..th {
+            for x in 0..tw {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    };
+
+    handle_key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    let out = text(&term);
+    assert!(out.contains("jk scroll"), "the footer says so: {out}");
+    assert!(
+        !out.contains("blame file"),
+        "the last section is off the bottom at this size"
+    );
+
+    // Scroll it into view. The `y` key added by this change lives in the same
+    // region — a documented key you cannot reach is a key that does not exist.
+    for _ in 0..3 {
+        handle_key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+    }
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    let out = text(&term);
+    assert!(out.contains("blame file"), "scrolled into view: {out}");
+    assert!(out.contains("submit the round"), "and so is `y`");
+
+    // Clamped at both ends: scrolling past the end shows the same last screen.
+    let end = out.clone();
+    handle_key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    assert_eq!(text(&term), end, "clamped at the bottom");
+    for _ in 0..9 {
+        handle_key(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
+    }
+    handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    assert!(text(&term).contains("move cursor"), "back to the top");
+
+    // Reopening starts at the top rather than where it was left.
+    handle_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+    assert!(app.help_open(), "space scrolls too");
+    handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+    handle_key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE);
+    assert_eq!(app.help_scroll, 0);
 }
 
 #[test]

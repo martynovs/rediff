@@ -66,17 +66,17 @@ Capturing review points in the TUI the human already uses, so an agent can grab 
 
 ## 5. Edit, retract, resolve, submit
 
-- [ ] 5.1 Edit reopens the input pre-filled and appends a superseding record with the same id.
-- [ ] 5.2 Retract appends `deleted`; resolve appends `resolved`. Neither rewrites anything.
-- [ ] 5.3 Submit: pick a verdict preset, edit the text, append a `Submit` closing the round.
-- [ ] 5.4 **Introduce** `[[verdict]]` presets (name + text) in `config.toml` with sensible defaults; they do not exist yet. `Config::load` discards the whole file on a parse error, so a malformed preset must not cost the user their theme and layout — parse presets tolerantly or separately. Add a `theming-and-config` delta, since the config file gains a top-level array.
-- [ ] 5.5 Tests: edit supersedes and both records remain; retracted thread is not delivered but stays on disk; resolved thread is still delivered, flagged; submitting closes the round and records the *edited* text with the preset name; submitting works with only a review-level comment.
+- [x] 5.1 Edit reopens the input pre-filled and appends a superseding record with the same id.
+- [x] 5.2 Retract appends `deleted`; resolve appends `resolved`. Neither rewrites anything.
+- [x] 5.3 Submit: pick a verdict preset, edit the text, append a `Submit` closing the round.
+- [x] 5.4 **Introduce** `[[verdict]]` presets (name + text) in `config.toml` with sensible defaults; they do not exist yet. `Config::load` discards the whole file on a parse error, so a malformed preset must not cost the user their theme and layout — parse presets tolerantly or separately. Add a `theming-and-config` delta, since the config file gains a top-level array.
+- [x] 5.5 Tests: edit supersedes and both records remain; retracted thread is not delivered but stays on disk; resolved thread is still delivered, flagged; submitting closes the round and records the *edited* text with the preset name; submitting works with only a review-level comment.
 
 ## 6. Keys, help, and routing
 
 - [x] 6.1 Route the new keys through a **new** `handle_review_key`, not by extending `handle_global_key` — that function is at CRAP **30** against a threshold of 30, and the review keys are inert outside a review session anyway.
 - [x] 6.2 Add every new binding to the `keymap.rs` catalog **and its `ALL_TABLES` list** — the consistency test asserts documented keys appear in tables, not the reverse, so nothing fails if a new key goes undocumented. Pick from what is free (`c C t s v` are all taken); the design proposes `a A e x o n y`.
-- [ ] 6.2a Check the help overlay still fits: `help_column` pads the left column's keys to **13** and the right's to 8 (`ui/overlays.rs`), and the box height is clamped to the body. The right column is 19 rows today, so seven more clip on an 80×24 terminal.
+- [x] 6.2a Check the help overlay still fits: `help_column` pads the left column's keys to **13** and the right's to 8 (`ui/overlays.rs`), and the box height is clamped to the body. The right column is 19 rows today, so seven more clip on an 80×24 terminal.
 - [x] 6.3 Keys are inert outside a review session — gate on `Session::is_review()` itself, **not** on a list of view kinds: `rediff review <rev>` is a `ViewKind::Commit` view that *is* a review session.
 - [x] 6.4 Tests: catalog consistency passes; each key is inert in a browse view and live after `R`.
 

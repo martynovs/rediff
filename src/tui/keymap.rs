@@ -65,11 +65,10 @@ pub const HELP_RIGHT: &[HelpSection] = &[
             ("v", "toggle reviewed"),
             ("u", "next unreviewed"),
             ("R", "review commit"),
-            ("a", "comment on line"),
+            ("a / A", "comment line / review"),
             ("n", "list comments"),
-            ("A", "comment on review"),
-            ("Enter", "save comment"),
-            ("esc", "discard comment"),
+            ("e / x / o", "edit / retract / resolve"),
+            ("y", "submit the round"),
         ],
     ),
     (
@@ -83,6 +82,20 @@ pub const HELP_RIGHT: &[HelpSection] = &[
         ],
     ),
 ];
+
+/// How many rendered rows a help column needs: a title and its rows per
+/// section, plus a blank line between sections.
+///
+/// Shared with the renderer so the help box's scroll clamp is computed from the
+/// same count the painter lays out.
+#[must_use]
+pub fn help_column_rows(sections: &[HelpSection]) -> usize {
+    sections
+        .iter()
+        .enumerate()
+        .map(|(i, (_, items))| usize::from(i > 0) + 1 + items.len())
+        .sum()
+}
 
 /// One displayable key binding: a key label (e.g. `"jk"`, `"[ ]"`, `"Tab"`) and
 /// what it does. Prose-only hints (e.g. "type to filter") use an empty `key`.
@@ -159,8 +172,26 @@ pub const BIND_COMMITMSG: &[Binding] = &[
 /// Composing a review comment.
 pub const BIND_COMMENT: &[Binding] = &[b("Enter", "save"), b("esc", "discard")];
 
-/// The review's thread list.
-pub const BIND_THREADS: &[Binding] = &[b("jk", "select"), b("Enter", "jump"), b("esc", "close")];
+/// The review's thread list, which is also where a thread is acted on: it is
+/// the only surface with an unambiguous "this thread" to edit or retract.
+pub const BIND_THREADS: &[Binding] = &[
+    b("jk", "select"),
+    b("Enter", "jump"),
+    b("e", "edit"),
+    b("x", "retract"),
+    b("o", "resolve"),
+    b("esc", "close"),
+];
+
+/// Closing a round, stage one: pick a verdict preset.
+pub const BIND_SUBMIT_PICK: &[Binding] = &[
+    b("jk", "select"),
+    b("Enter", "edit text"),
+    b("esc", "cancel"),
+];
+
+/// Closing a round, stage two: edit the instruction and send.
+pub const BIND_SUBMIT_EDIT: &[Binding] = &[b("Enter", "submit"), b("esc", "back to presets")];
 
 /// The fuzzy file palette.
 pub const BIND_PALETTE_FILE: &[Binding] = &[
@@ -226,6 +257,8 @@ mod tests {
         BIND_COMMITMSG,
         BIND_COMMENT,
         BIND_THREADS,
+        BIND_SUBMIT_PICK,
+        BIND_SUBMIT_EDIT,
         BIND_PALETTE_FILE,
         BIND_PALETTE_COMMIT,
         BIND_THEME,

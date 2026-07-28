@@ -42,16 +42,28 @@ pub(crate) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     // A transient status cue lives until the next keystroke.
     app.flash = None;
     match app.active_context() {
-        // The help overlay captures all input; any key dismisses it.
-        InputContext::Help => app.toggle_help(),
+        InputContext::Help => handle_help_key(app, code),
         InputContext::CommitMsg => handle_commit_msg_key(app, code),
         InputContext::Palette => handle_palette_key(app, code),
         InputContext::ThemePicker => handle_theme_picker_key(app, code),
         InputContext::Comment => handle_comment_key(app, code, mods),
         InputContext::Threads => handle_threads_key(app, code),
+        InputContext::Submit => handle_submit_key(app, code, mods),
         // The single-file peek base captures all input while open.
         InputContext::Peek => handle_peek_key(app, code, mods),
         InputContext::Normal => handle_base_key(app, code, mods),
+    }
+}
+
+/// The help overlay: scroll keys move it (the catalog no longer fits an 80x24
+/// terminal), and any other key dismisses it as it always has.
+fn handle_help_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Down | KeyCode::Char('j') => app.help_scroll_by(1),
+        KeyCode::Up | KeyCode::Char('k') => app.help_scroll_by(-1),
+        KeyCode::PageDown | KeyCode::Char(' ') => app.help_scroll_by(BIG_STEP),
+        KeyCode::PageUp => app.help_scroll_by(-BIG_STEP),
+        _ => app.toggle_help(),
     }
 }
 
@@ -95,13 +107,42 @@ fn handle_base_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     handle_focus_key(app, code, mods);
 }
 
-/// The thread list: move the selection, jump to one, or close.
+/// The thread list: move the selection, jump to one, act on it, or close.
+///
+/// Edit/retract/resolve live here rather than in the base context because this
+/// is the only surface with an unambiguous target — a diff line can carry
+/// several threads, and "act on the one under the cursor" would have to pick.
 fn handle_threads_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc | KeyCode::Char('q') => app.threads_close(),
         KeyCode::Enter => app.threads_jump(),
         KeyCode::Down | KeyCode::Char('j') => app.threads_move(1),
         KeyCode::Up | KeyCode::Char('k') => app.threads_move(-1),
+        KeyCode::Char('e') => app.threads_edit(),
+        KeyCode::Char('x') => app.threads_retract(),
+        KeyCode::Char('o') => app.threads_resolve(),
+        _ => {}
+    }
+}
+
+/// Closing the round: a preset list, then a text editor over it. `Esc` steps
+/// back one stage rather than discarding, so a mistyped `Esc` while editing
+/// costs a preset choice, not the instruction.
+fn handle_submit_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let editing = app.submit_draft().is_some_and(|d| d.buffer.is_some());
+    match code {
+        KeyCode::Esc => app.submit_cancel(),
+        KeyCode::Enter => app.submit_confirm(),
+        // Picking only: while editing, the preset is fixed. Changing it under
+        // the typed text is exactly the "whose words are these?" ambiguity the
+        // two stages exist to remove.
+        KeyCode::Down | KeyCode::Char('j') if !editing => app.submit_move(1),
+        KeyCode::Up | KeyCode::Char('k') if !editing => app.submit_move(-1),
+        KeyCode::Char('q') if !editing => app.submit_cancel(),
+        KeyCode::Backspace if editing => app.submit_backspace(),
+        // A Ctrl chord is not text, in the one buffer that gets persisted.
+        KeyCode::Char(_) if mods.contains(KeyModifiers::CONTROL) => {}
+        KeyCode::Char(c) if editing => app.submit_input(c),
         _ => {}
     }
 }
@@ -117,6 +158,7 @@ fn handle_review_key(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Char('a') => app.open_comment(true),
         KeyCode::Char('A') => app.open_comment(false),
         KeyCode::Char('n') => app.open_threads(),
+        KeyCode::Char('y') => app.open_submit(),
         _ => return false,
     }
     true

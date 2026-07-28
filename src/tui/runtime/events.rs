@@ -76,6 +76,11 @@ pub fn run(
         .and_then(|repo| crate::review::log_path(&repo))
         .map(crate::review::Log::new);
     app.attach_review_log(log, !filters.is_empty());
+    // Re-read rather than threaded through from `main`: the presets are needed
+    // once, at the moment a round is closed, and reading them here means an edit
+    // to `config.toml` takes effect on the next launch without another argument
+    // on a signature that already has eight.
+    app.verdicts = crate::config::Config::load().verdicts();
     app.begin_load(stubs, false);
 
     let mut terminal = setup_terminal()?;
@@ -219,7 +224,7 @@ fn dispatch_event(app: &mut App, ev: &Event) -> bool {
                 }
                 // Composing a comment absorbs the mouse entirely: there is
                 // nothing to scroll and a click must not reach the diff behind.
-                InputContext::Comment | InputContext::Threads => true,
+                InputContext::Comment | InputContext::Threads | InputContext::Submit => true,
                 // While the peek is open, the wheel scrolls it; clicks are ignored.
                 InputContext::Peek => {
                     if let Some(d) = wheel {

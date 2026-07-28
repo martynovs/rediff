@@ -104,7 +104,14 @@ impl App {
             input.replacing.clone(),
         );
 
-        if let Err(msg) = self.record_thread(anchor, body, replacing.as_deref()) {
+        let result = match replacing {
+            // An edit supersedes an existing thread, so it neither opens a
+            // review nor opens a round: the review is open by construction, and
+            // rewording a comment is not new content to hash.
+            Some(id) => self.edit_confirm(&id, body),
+            None => self.record_thread(anchor, body),
+        };
+        if let Err(msg) = result {
             // Keep the input open so the typed text is not lost, and report
             // *inside* the box — `draw_status` hides the flash while an overlay
             // is up, so a refusal sent there would never be seen.
@@ -116,12 +123,26 @@ impl App {
         self.mode.pop_overlay();
     }
 
-    /// Open/attach the review and append the thread. `Err` carries a message.
+    /// Supersede an existing thread's text, keeping every other field.
+    fn edit_confirm(&mut self, id: &str, body: String) -> Result<(), String> {
+        let log: &Log = self
+            .review_log
+            .as_ref()
+            .ok_or_else(|| "no review log for this repository".to_string())?;
+        let found = crate::tui::reviewlog::supersede(log, id, |t| t.body = body)
+            .map_err(|e| format!("could not write the review log: {e}"))?;
+        if !found {
+            return Err("that review point is no longer in the log".to_string());
+        }
+        self.refresh_threads();
+        Ok(())
+    }
+
+    /// Open/attach the review and append a new thread. `Err` carries a message.
     fn record_thread(
         &mut self,
         anchor: Option<crate::review::Anchor>,
         body: String,
-        replacing: Option<&str>,
     ) -> Result<(), String> {
         let target = self.review_target().ok_or_else(|| {
             "this view has no target a review can be recorded against".to_string()
@@ -137,9 +158,8 @@ impl App {
         // A *thread* id, not a review id: `new_review_id` seeds on
         // `(pid, seconds)` alone, so two comments in the same second would share
         // one and `fold` would silently drop the earlier.
-        let id = replacing.map_or_else(crate::tui::reviewlog::new_thread_id, ToString::to_string);
         log.append(&Record::Thread(Thread {
-            id,
+            id: crate::tui::reviewlog::new_thread_id(),
             anchor,
             body,
             // NOT `replacing`: superseding is by reusing the `id`. `replace` is
@@ -152,7 +172,7 @@ impl App {
         }))
         .map_err(|e| format!("could not write the review log: {e}"))?;
 
-        self.refresh_thread_marks();
+        self.refresh_threads();
         // The ignore hint rides on a *fresh* review — the only signal the store
         // gives that a log has just appeared in the worktree.
         if opening.opened == crate::review::Opened::Fresh {
@@ -206,6 +226,71 @@ impl App {
         self.mode.pop_overlay();
     }
 
+    /// Reopen the input over the selected thread, pre-filled with its text.
+    ///
+    /// The anchor comes from the stored record rather than from the list's
+    /// resolved position: superseding must not silently re-anchor a comment to
+    /// wherever it happens to sit now.
+    pub fn threads_edit(&mut self) {
+        let Some(id) = self
+            .thread_list()
+            .and_then(|l| l.current())
+            .map(|t| t.id.clone())
+        else {
+            return;
+        };
+        let Some(log) = self.review_log.as_ref() else {
+            return;
+        };
+        let Ok(st) = log.state() else {
+            self.flash = Some("could not read the review log".to_string());
+            return;
+        };
+        let Some(t) = st.threads.get(&id) else {
+            self.flash = Some("that review point is no longer in the log".to_string());
+            return;
+        };
+        let mut input = CommentInput::new(t.thread.anchor.clone());
+        input.buffer.clone_from(&t.thread.body);
+        input.replacing = Some(id);
+        // Pushed *over* the list, so Esc returns to it rather than to the diff.
+        self.mode.push_overlay(Overlay::Comment(input));
+    }
+
+    /// Retract the selected thread, or restore it if it is already retracted.
+    ///
+    /// A toggle, not a one-way door: retracting withdraws a comment from every
+    /// read path, so an unrepeatable keystroke would be a way to lose a review
+    /// point with no way back from inside rediff. The list keeps retracted
+    /// threads visible for exactly this reason.
+    pub fn threads_retract(&mut self) {
+        self.supersede_selected("retract", |t| t.deleted = !t.deleted);
+    }
+
+    /// Mark the selected thread resolved, or unresolved if it already is.
+    pub fn threads_resolve(&mut self) {
+        self.supersede_selected("resolve", |t| t.resolved = !t.resolved);
+    }
+
+    /// Apply `edit` to the selected thread and append the superseding record.
+    fn supersede_selected(&mut self, what: &str, edit: impl FnOnce(&mut Thread)) {
+        let Some(id) = self
+            .thread_list()
+            .and_then(|l| l.current())
+            .map(|t| t.id.clone())
+        else {
+            return;
+        };
+        let Some(log) = self.review_log.as_ref() else {
+            return;
+        };
+        match crate::tui::reviewlog::supersede(log, &id, edit) {
+            Ok(true) => self.refresh_threads(),
+            Ok(false) => self.flash = Some("that review point is no longer in the log".to_string()),
+            Err(e) => self.flash = Some(format!("could not {what}: {e}")),
+        }
+    }
+
     /// Jump to the selected thread's line and close the list.
     ///
     /// Moves `cursor_row`, not just `scroll`: `stream::clamp` runs every frame
@@ -240,11 +325,13 @@ impl App {
         crate::tui::stream::anchor_selected(&mut e.state, &e.plan);
     }
 
-    /// Re-index the review's live threads against the current changeset.
+    /// Re-read the review's threads: the gutter index, and any open list.
     ///
     /// Called after *our own* appends only. Nothing watches the log, so there is
-    /// no other moment at which it can change under us.
-    pub(crate) fn refresh_thread_marks(&mut self) {
+    /// no other moment at which it can change under us — and the open list has
+    /// to be refreshed here too, since editing or retracting from it returns to
+    /// a list that would otherwise still show what was just superseded.
+    pub(crate) fn refresh_threads(&mut self) {
         let Some(log) = self.review_log.as_ref() else {
             return;
         };
@@ -252,6 +339,24 @@ impl App {
         let cs = self.cs().clone();
         let live = crate::tui::reviewlog::live_threads(&st, &cs);
         self.thread_marks = crate::tui::reviewlog::thread_index(&live, &cs);
+        // The selection is an index, and superseding never reorders or removes
+        // a thread (`fold` keys by id, in first-appearance order), so the same
+        // index still names the same thread. Clamped anyway.
+        if let Some(Overlay::Threads(l)) = self.find_thread_list() {
+            l.selected = l.selected.min(live.len().saturating_sub(1));
+            l.threads = live;
+        }
+    }
+
+    /// The thread list wherever it sits in the overlay stack.
+    ///
+    /// Not `overlay_mut`: editing pushes the comment input *over* the list, so
+    /// after a confirming edit the list is no longer the topmost overlay.
+    fn find_thread_list(&mut self) -> Option<&mut Overlay> {
+        self.mode
+            .overlays_mut()
+            .iter_mut()
+            .find(|o| matches!(o, Overlay::Threads(_)))
     }
 
     /// The encoded review target for the current view, from its `LoadRequest`.
@@ -694,14 +799,23 @@ mod tests {
 
         handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
         let list = app.thread_list().unwrap();
-        let bodies: Vec<&str> = list.threads.iter().map(|t| t.body.as_str()).collect();
-        assert!(
-            !bodies.contains(&"gone"),
-            "retracted is not shown: {bodies:?}"
-        );
-        assert!(bodies.contains(&"done"), "resolved is still shown, flagged");
-        let done = list.threads.iter().find(|t| t.body == "done").unwrap();
-        assert_eq!(done.state_label(), "resolved");
+        let label = |body: &str| {
+            list.threads
+                .iter()
+                .find(|t| t.body == body)
+                .unwrap_or_else(|| panic!("{body} is listed"))
+                .state_label()
+        };
+        // Retracted is listed, and says so — the list is the only place it can
+        // be un-retracted from, so hiding it would make `x` a one-way door.
+        assert_eq!(label("gone"), "retracted");
+        assert_eq!(label("done"), "resolved");
+
+        // ...but it carries no gutter mark: the margin marks lines that still
+        // have something to say.
+        app.threads_close();
+        let marked: usize = app.thread_marks.values().sum();
+        assert_eq!(marked, 0, "unanchored threads mark no line anyway");
     }
 
     #[test]
@@ -798,7 +912,7 @@ mod tests {
         );
         assert!(app.flash.as_deref().unwrap().contains("no worktree"));
 
-        app.refresh_thread_marks();
+        app.refresh_threads();
         assert!(app.thread_marks.is_empty());
     }
 
@@ -874,6 +988,7 @@ mod tests {
             id: "t".into(),
             body: "b".into(),
             resolved,
+            deleted: false,
             placement,
             path: Some("a.rs".into()),
             key: None,
@@ -967,6 +1082,229 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
         assert!(app.thread_list().is_none());
         assert!(app.flash.is_some(), "the user is told, not left guessing");
+    }
+
+    /// Open the thread list on the one recorded thread.
+    fn open_list(app: &mut App) {
+        handle_key(app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(app.thread_list().is_some(), "the list opened");
+    }
+
+    #[test]
+    fn an_edit_supersedes_and_both_records_stay_on_disk() {
+        let (dir, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "frist");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        open_list(&mut app);
+        handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+        let input = app.comment_input_state().expect("the input reopened");
+        assert_eq!(input.buffer, "frist", "pre-filled with the current text");
+        assert!(input.replacing.is_some(), "and marked as an edit");
+        assert!(input.anchor.is_some(), "carrying the stored anchor");
+        for _ in 0..5 {
+            handle_key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        }
+        type_str(&mut app, "first");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        let log = Log::at_worktree(dir.path());
+        let st = log.state().unwrap();
+        assert_eq!(st.threads.len(), 1, "one thread, not two");
+        let t = st.threads.values().next().unwrap();
+        assert_eq!(t.thread.body, "first", "reads as the new text");
+        assert_eq!(
+            t.thread.anchor.as_ref().map(|a| a.line),
+            Some(1),
+            "the anchor carried through the supersede"
+        );
+        // Both records are on disk: superseding is an append, not a rewrite.
+        let raw = std::fs::read_to_string(log.path()).unwrap();
+        assert!(raw.contains("frist"), "the earlier entry is retained");
+        assert!(raw.contains("\"first\""), "and the later one written");
+
+        // The list beneath was refreshed, not left showing the old text.
+        assert!(app.thread_list().is_some(), "Esc-free return to the list");
+        assert_eq!(app.thread_list().unwrap().current().unwrap().body, "first");
+    }
+
+    #[test]
+    fn editing_a_resolved_thread_leaves_it_resolved() {
+        // The reason a supersede copies the stored record instead of building a
+        // fresh one: every flag the edit does not touch has to carry forward.
+        let (dir, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+        type_str(&mut app, "typo here");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        open_list(&mut app);
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        assert_eq!(
+            app.thread_list().unwrap().current().unwrap().state_label(),
+            "resolved"
+        );
+
+        handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+        type_str(&mut app, "!");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        let st = Log::at_worktree(dir.path()).state().unwrap();
+        let t = st.threads.values().next().unwrap();
+        assert_eq!(t.thread.body, "typo here!");
+        assert!(t.thread.resolved, "still resolved after an edit");
+    }
+
+    #[test]
+    fn retracting_withdraws_from_delivery_and_can_be_undone() {
+        let (dir, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "never mind this one");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let log = Log::at_worktree(dir.path());
+
+        open_list(&mut app);
+        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(
+            app.thread_list().unwrap().current().unwrap().state_label(),
+            "retracted"
+        );
+        let delivery = crate::review::all(&log.state().unwrap(), app.cs().as_ref());
+        assert!(delivery.threads.is_empty(), "not delivered to a consumer");
+        // ...and still on disk, both entries.
+        let raw = std::fs::read_to_string(log.path()).unwrap();
+        assert_eq!(
+            raw.matches("never mind this one").count(),
+            2,
+            "the original and its retraction: {raw}"
+        );
+        // The gutter mark is gone with it.
+        assert!(app.thread_marks.is_empty(), "no mark on a retracted line");
+
+        // `x` again restores it: one keystroke must not cost a review point
+        // with no way back from inside rediff.
+        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(
+            app.thread_list().unwrap().current().unwrap().state_label(),
+            "here"
+        );
+        assert_eq!(
+            crate::review::all(&log.state().unwrap(), app.cs().as_ref())
+                .threads
+                .len(),
+            1
+        );
+        assert_eq!(app.thread_marks.len(), 1, "and the mark comes back");
+    }
+
+    #[test]
+    fn a_resolved_thread_is_still_delivered_and_flagged() {
+        let (dir, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "handled");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        open_list(&mut app);
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+
+        let st = Log::at_worktree(dir.path()).state().unwrap();
+        let delivery = crate::review::all(&st, app.cs().as_ref());
+        assert_eq!(delivery.threads.len(), 1, "resolving does not withdraw it");
+        assert!(delivery.threads[0].thread.resolved, "flagged resolved");
+
+        // And toggles back off.
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        let st = Log::at_worktree(dir.path()).state().unwrap();
+        assert!(!st.threads.values().next().unwrap().thread.resolved);
+    }
+
+    #[test]
+    fn thread_actions_are_inert_with_no_list_open() {
+        // Reachable only via the router while the list is up, so exercised
+        // directly rather than left as a coverage hole.
+        let (dir, mut app) = app_with_log();
+        app.threads_edit();
+        app.threads_retract();
+        app.threads_resolve();
+        assert!(app.comment_input_state().is_none());
+        assert!(!Log::at_worktree(dir.path()).path().exists());
+    }
+
+    #[test]
+    fn acting_on_a_thread_the_log_no_longer_has_says_so() {
+        // The `Ok(false)` arm: the list holds an id the log does not. Only
+        // reachable by rewriting the log behind the open list, which is what a
+        // second rediff replacing a spent review would do.
+        let (dir, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+        type_str(&mut app, "vanishing");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        open_list(&mut app);
+
+        let log = Log::at_worktree(dir.path());
+        std::fs::write(log.path(), "").unwrap();
+        app.flash = None;
+        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(
+            app.flash
+                .as_deref()
+                .unwrap()
+                .contains("no longer in the log"),
+            "{:?}",
+            app.flash
+        );
+        app.flash = None;
+        handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+        assert!(app.comment_input_state().is_none(), "nothing to edit");
+        assert!(app
+            .flash
+            .as_deref()
+            .unwrap()
+            .contains("no longer in the log"));
+    }
+
+    #[test]
+    fn an_unreadable_log_is_reported_rather_than_swallowed() {
+        let (dir, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+        type_str(&mut app, "here");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        open_list(&mut app);
+
+        // Replace the log file with a directory: every read of it now fails.
+        let log = Log::at_worktree(dir.path());
+        std::fs::remove_file(log.path()).unwrap();
+        std::fs::create_dir(log.path()).unwrap();
+
+        app.flash = None;
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        assert!(
+            app.flash.as_deref().unwrap().contains("could not resolve"),
+            "{:?}",
+            app.flash
+        );
+        app.flash = None;
+        handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+        assert!(app.comment_input_state().is_none());
+        assert!(app.flash.as_deref().unwrap().contains("could not read"));
+    }
+
+    #[test]
+    fn an_edit_confirmed_without_a_log_reports_rather_than_panicking() {
+        // The `edit_confirm` no-log arm: only reachable by detaching the log
+        // between opening the input and confirming it.
+        let (_d, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "x");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        open_list(&mut app);
+        handle_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+
+        app.attach_review_log(None, false);
+        type_str(&mut app, "y");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let input = app.comment_input_state().expect("stays open");
+        assert!(input.refusal.as_deref().unwrap().contains("no review log"));
     }
 
     #[test]

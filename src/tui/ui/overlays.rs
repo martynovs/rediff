@@ -280,6 +280,28 @@ const HELP_RIGHT_W: u16 = 24;
 const HELP_GUTTER: u16 = 4;
 const HELP_PAD: u16 = 2;
 
+/// The help box's visible content rows for a body of this size.
+///
+/// Derived from the same box math the painter uses, so the scroll clamp cannot
+/// drift from what is actually drawn.
+pub(super) fn help_body_rows(body: Rect) -> usize {
+    let content_rows = help_content_rows();
+    let h = (content_rows + 5).max(6).min(body.height.saturating_sub(2));
+    // inner = h - borders(2) - top pad(1), less the blank + footer rows.
+    usize::from(h.saturating_sub(3).saturating_sub(1)).max(1)
+}
+
+/// Total rows the two help columns need — the taller of the two.
+pub(super) fn help_content_rows() -> u16 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "help rows are a small fixed key-reference list, well below u16::MAX"
+    )]
+    let rows = keymap::help_column_rows(keymap::HELP_LEFT)
+        .max(keymap::help_column_rows(keymap::HELP_RIGHT)) as u16;
+    rows
+}
+
 pub(super) fn draw_help(frame: &mut Frame, body: Rect, app: &App) {
     let t = &app.theme;
     let left = help_column(t, keymap::HELP_LEFT, 13);
@@ -313,15 +335,28 @@ pub(super) fn draw_help(frame: &mut Frame, body: Rect, app: &App) {
         .into(),
     );
 
-    let content = footer_hint(frame, inner, t.muted, None, "any key to close");
+    // The catalog outgrew an 80×24 terminal, so the box scrolls rather than
+    // silently dropping its last section — a key you cannot see documented is a
+    // key that does not exist.
+    let hint = if content_rows > h.saturating_sub(5) {
+        "jk scroll · any other key closes"
+    } else {
+        "any key to close"
+    };
+    let content = footer_hint(frame, inner, t.muted, None, hint);
     let [lcol, rcol] = Layout::horizontal([
         Constraint::Length(HELP_LEFT_W),
         Constraint::Min(HELP_RIGHT_W),
     ])
     .spacing(HELP_GUTTER)
     .areas(content);
-    frame.render_widget(Paragraph::new(left), lcol);
-    frame.render_widget(Paragraph::new(right), rcol);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the scroll is clamped to the help catalog's row count, well below u16::MAX"
+    )]
+    let off = app.help_scroll as u16;
+    frame.render_widget(Paragraph::new(left).scroll((off, 0)), lcol);
+    frame.render_widget(Paragraph::new(right).scroll((off, 0)), rcol);
 }
 
 #[expect(
@@ -594,6 +629,85 @@ pub(super) fn draw_threads(frame: &mut Frame, body: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Closing the round: the preset list, or the chosen instruction being edited.
+pub(super) fn draw_submit(frame: &mut Frame, body: Rect, app: &App) {
+    let Some(d) = app.submit_draft() else {
+        return;
+    };
+    let t = &app.theme;
+    let accent = t.accent;
+    let w = (body.width.saturating_mul(8) / 10)
+        .max(30)
+        .min(body.width.saturating_sub(2));
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a config's preset count is far below u16::MAX; clamped to the body height"
+    )]
+    let rows = match d.buffer {
+        // The edited instruction plus a row for a refusal.
+        Some(_) => 2,
+        None => (d.presets.len() as u16).clamp(1, body.height.saturating_sub(4)),
+    };
+    let inner = popup_frame(
+        frame,
+        body,
+        w,
+        rows.saturating_add(2),
+        3,
+        accent,
+        t.bg,
+        Padding::new(1, 1, 0, 0),
+        Line::from(Span::styled(
+            format!(" {} ", d.title()),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+    );
+
+    let lines: Vec<Line> = match d.buffer.as_deref() {
+        Some(buf) => vec![
+            Line::from(vec![
+                Span::styled(tail(buf, inner.width), Style::default().fg(t.context)),
+                Span::styled("\u{2588}", Style::default().fg(accent)),
+            ]),
+            Line::from(Span::styled(
+                d.refusal.clone().unwrap_or_default(),
+                Style::default().fg(t.warn),
+            )),
+        ],
+        None => d
+            .presets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let line = Line::from(vec![
+                    Span::styled(format!("{:<12} ", p.name), Style::default().fg(accent)),
+                    Span::styled(p.text.clone(), Style::default().fg(t.muted)),
+                ]);
+                if i == d.selected {
+                    line.style(Style::default().bg(t.sel_focus_bg))
+                } else {
+                    line
+                }
+            })
+            .collect(),
+    };
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The tail of `s` that fits in `width` columns, leaving one for the caret.
+///
+/// Shared by the two text inputs so a long line is never typed blind with the
+/// cursor off the end of the box.
+fn tail(s: &str, width: u16) -> String {
+    let room = (width as usize).saturating_sub(1);
+    let chars: Vec<char> = s.chars().collect();
+    chars
+        .get(chars.len().saturating_sub(room)..)
+        .unwrap_or_default()
+        .iter()
+        .collect()
+}
+
 /// The comment input: a titled one-line box over whatever summoned it.
 pub(super) fn draw_comment(frame: &mut Frame, body: Rect, app: &App) {
     let Some(input) = app.comment_input_state() else {
@@ -620,15 +734,7 @@ pub(super) fn draw_comment(frame: &mut Frame, body: Rect, app: &App) {
     );
     // Keep the caret in view: show the tail of a buffer wider than the box, so a
     // long comment is not typed blind with the cursor off the end.
-    let room = (inner.width as usize).saturating_sub(1);
-    let shown: String = {
-        let chars: Vec<char> = input.buffer.chars().collect();
-        chars
-            .get(chars.len().saturating_sub(room)..)
-            .unwrap_or_default()
-            .iter()
-            .collect()
-    };
+    let shown = tail(&input.buffer, inner.width);
     // A block cursor after the text, so an empty input still shows where typing
     // will land.
     let line = Line::from(vec![

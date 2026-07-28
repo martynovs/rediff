@@ -464,6 +464,7 @@ impl App {
             Some(Overlay::ThemePicker(_)) => InputContext::ThemePicker,
             Some(Overlay::Comment(_)) => InputContext::Comment,
             Some(Overlay::Threads(_)) => InputContext::Threads,
+            Some(Overlay::Submit(_)) => InputContext::Submit,
             None if self.peek_open() => InputContext::Peek,
             None => InputContext::Normal,
         }
@@ -481,6 +482,13 @@ impl App {
             InputContext::CommitMsg => k::BIND_COMMITMSG,
             InputContext::Comment => k::BIND_COMMENT,
             InputContext::Threads => k::BIND_THREADS,
+            InputContext::Submit => {
+                if self.submit_draft().is_some_and(|d| d.buffer.is_some()) {
+                    k::BIND_SUBMIT_EDIT
+                } else {
+                    k::BIND_SUBMIT_PICK
+                }
+            }
             InputContext::ThemePicker => k::BIND_THEME,
             InputContext::Palette => {
                 if self.commit_palette_open() {
@@ -587,8 +595,25 @@ impl App {
         if self.help_open() {
             self.mode.pop_overlay();
         } else {
+            self.help_scroll = 0;
             self.mode.push_overlay(Overlay::Help);
         }
+    }
+
+    /// Scroll the help box, clamped to what it cannot show at this size.
+    pub fn help_scroll_by(&mut self, delta: isize) {
+        let max = crate::tui::keymap::help_column_rows(crate::tui::keymap::HELP_LEFT)
+            .max(crate::tui::keymap::help_column_rows(
+                crate::tui::keymap::HELP_RIGHT,
+            ))
+            .saturating_sub(self.help_viewport_h);
+        #[expect(
+            clippy::cast_possible_wrap,
+            clippy::cast_sign_loss,
+            reason = "the help catalog is a small fixed list; clamped to >= 0 before the cast back"
+        )]
+        let next = (self.help_scroll as isize + delta).clamp(0, max as isize) as usize;
+        self.help_scroll = next;
     }
 }
 
