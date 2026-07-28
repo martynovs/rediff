@@ -16,7 +16,8 @@ background pool so the file list appears instantly even on large changesets.
 - **Review workflow** — mark files reviewed (`v`), jump to the next unreviewed
   (`u`), and a live `✓ X/N` count. Finish a directory and it folds itself away.
 - **Leave review points for an agent** — a line cursor (`j`/`k`) marks a line;
-  `a` comments on it, `A` on the review as a whole. Comments land in a local
+  `a` comments on it, `A` on the review as a whole, `n` lists what you have
+  said, and `y` closes the round with an instruction. Comments land in a local
   `rediff.jsonl`, and an agent drains them with `rediff feedback`. Neither side
   blocks on the other.
 - **Directory grouping & collapse** — files grouped under their directory; fold
@@ -88,20 +89,45 @@ split|stack`, `--theme dark|light`, and trailing path filters (e.g.
 A human reads the diff and leaves review points; an agent picks them up and
 answers. Neither blocks on the other.
 
+Inside the viewer:
+
+| Key | |
+|---|---|
+| `j` / `k` | move the line cursor |
+| `a` | comment on the line under it |
+| `A` | comment on the review as a whole |
+| `n` | list your review points — `Enter` jumps to one |
+| `e` / `x` / `o` | in that list: edit, retract, resolve |
+| `y` | close the round with a parting instruction |
+
+A commented line is marked in the gutter. `x` and `o` are toggles and retracted
+points stay in the list, so nothing you write is one keystroke from being
+unreachable. `y` offers the `[[verdict]]` presets from your config, editable
+before you send — what is delivered is what you actually wrote.
+
+From the agent's side:
+
 ```sh
-rediff                       # `j`/`k` move the cursor, `a` comments on the line
-                             # under it, `A` on the review as a whole
-rediff request [ref]         # (agent) open a review over a target
+rediff request [ref]         # open a review over a target
 rediff review-status         # what is pending, delivered, drained
-rediff feedback              # (agent) drain the comments, as JSON
+rediff feedback              # drain the comments, as JSON
 rediff feedback --all        # replay everything, including delivered
 ```
 
+Nothing is written until you leave your first comment — browsing a diff creates
+no log. A review the TUI opens is indistinguishable from one `rediff request`
+opened, so either side can start the conversation.
+
 Comments are appended to **`rediff.jsonl` at the worktree root** — one JSON
-record per line, append-only, superseded by id rather than rewritten. Each
-comment carries the line's own text and a little surrounding context, so it
-re-resolves against a later diff without any stored blob; `feedback` reports
-each one as attached, shifted, detached, or unresolved.
+record per line, append-only, superseded by id rather than rewritten. Editing a
+comment leaves the earlier record in place; retracting one withdraws it from
+delivery without removing it. Each comment carries the line's own text and a
+little surrounding context, so it re-resolves against a later diff without any
+stored blob; `feedback` reports each one as attached, shifted, detached, or
+unresolved.
+
+Files you mark reviewed (`v`) are remembered too, once a review is open, and
+restored by path when you come back to it.
 
 It is a local working file, not history: rediff hides it from its own diff
 views, and `.gitignore` it (this repo does). Deleting it is a complete
