@@ -441,3 +441,58 @@ fn emit_covers_all_kinds_and_span_fallback() {
     assert!(context.contains("ctx"));
     assert!(context.ends_with(&format!("{RESET}\n")));
 }
+
+const REVIEW_LOG_DIFF: &str = "\
+diff --git a/rediff.jsonl b/rediff.jsonl
+--- a/rediff.jsonl
++++ b/rediff.jsonl
+@@ -1,1 +1,2 @@
+ {\"t\":\"open\",\"review\":\"r1\"}
++{\"t\":\"thread\",\"id\":\"t1\",\"body\":\"a private note\"}
+";
+
+const SUBDIR_LOG_DIFF: &str = "\
+diff --git a/sub/rediff.jsonl b/sub/rediff.jsonl
+--- a/sub/rediff.jsonl
++++ b/sub/rediff.jsonl
+@@ -1,1 +1,2 @@
+ keep
++me
+";
+
+#[test]
+fn the_review_log_is_not_rendered_by_the_pager() {
+    // git hands the pager whatever it diffed; rediff's own log is tool state, so
+    // it must not come back out — otherwise the reviewer reads their own review.
+    let out = render(REVIEW_LOG_DIFF, dark());
+    assert_eq!(out, "", "the log section is dropped entirely");
+    assert!(!out.contains("a private note"));
+}
+
+#[test]
+fn the_pager_still_renders_other_files_alongside_the_log() {
+    let combined = format!("{REVIEW_LOG_DIFF}{MODIFY}");
+    let out = render(&combined, dark());
+    assert!(out.contains("src/lib.rs"), "the real file survives");
+    assert!(!out.contains("rediff.jsonl"), "the log does not");
+}
+
+#[test]
+fn a_log_named_file_in_a_subdirectory_is_ordinary() {
+    let out = render(SUBDIR_LOG_DIFF, dark());
+    assert!(
+        out.contains("sub/rediff.jsonl"),
+        "only the worktree-root log is tool state"
+    );
+}
+
+#[test]
+fn external_skips_the_review_log() {
+    // `rediff external` is invoked per file by git (the lazygit setup), so the
+    // check has to live there too, not only in the loader.
+    assert!(is_review_log("rediff.jsonl"));
+    assert!(is_review_log("./rediff.jsonl"));
+    assert!(!is_review_log("sub/rediff.jsonl"));
+    assert!(!is_review_log("my-rediff.jsonl"));
+    assert!(!is_review_log("rediff.jsonl.golden"));
+}

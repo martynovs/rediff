@@ -19,7 +19,7 @@ pub const HELP_LEFT: &[HelpSection] = &[
     (
         "Move",
         &[
-            ("j / k  ↑↓", "scroll 1 · ⇧ fast"),
+            ("j / k  ↑↓", "move cursor · ⇧ scrolls"),
             ("PgDn / PgUp", "page down / up"),
             ("Ctrl-f / b", "half-page down / up"),
             ("[ / ]", "prev / next hunk"),
@@ -65,6 +65,10 @@ pub const HELP_RIGHT: &[HelpSection] = &[
             ("v", "toggle reviewed"),
             ("u", "next unreviewed"),
             ("R", "review commit"),
+            ("a", "comment on line"),
+            ("A", "comment on review"),
+            ("Enter", "save comment"),
+            ("esc", "discard comment"),
         ],
     ),
     (
@@ -100,9 +104,10 @@ const fn b(key: &'static str, desc: &'static str) -> Binding {
 
 /// Diff-stream focus.
 pub const BIND_STREAM: &[Binding] = &[
-    b("jk", "scroll"),
+    b("jk", "cursor"),
     b("[ ]", "hunk"),
     b("{ }", "file"),
+    b("a", "comment"),
     b("c", "commits"),
     b("F", "log"),
     b("< >", "hist"),
@@ -149,6 +154,9 @@ pub const BIND_COMMITMSG: &[Binding] = &[
     b("Enter", "open commit"),
     b("Tab/esc", "close"),
 ];
+
+/// Composing a review comment.
+pub const BIND_COMMENT: &[Binding] = &[b("Enter", "save"), b("esc", "discard")];
 
 /// The fuzzy file palette.
 pub const BIND_PALETTE_FILE: &[Binding] = &[
@@ -212,6 +220,7 @@ mod tests {
         BIND_PEEK_CONTENT,
         BIND_PEEK_BLAME,
         BIND_COMMITMSG,
+        BIND_COMMENT,
         BIND_PALETTE_FILE,
         BIND_PALETTE_COMMIT,
         BIND_THEME,

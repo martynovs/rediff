@@ -399,6 +399,7 @@ fn content_file(path: &str, content: &str) -> DiffFile {
         is_binary: false,
         old_text: None,
         new_text: Some(content.to_string()),
+        content_digest: None,
         diffed: true,
     }
 }
@@ -419,6 +420,7 @@ fn diff_file(path: &str, old: &str, new: &str, context: u32) -> DiffFile {
         is_binary: false,
         old_text: Some(old.to_string()),
         new_text: Some(new.to_string()),
+        content_digest: None,
         diffed: true,
     }
 }

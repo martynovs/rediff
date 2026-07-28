@@ -462,6 +462,7 @@ impl App {
             Some(Overlay::CommitMessage(_)) => InputContext::CommitMsg,
             Some(Overlay::Palette(_)) => InputContext::Palette,
             Some(Overlay::ThemePicker(_)) => InputContext::ThemePicker,
+            Some(Overlay::Comment(_)) => InputContext::Comment,
             None if self.peek_open() => InputContext::Peek,
             None => InputContext::Normal,
         }
@@ -477,6 +478,7 @@ impl App {
             // Help renders its own dismiss hint in the status bar, not a table.
             InputContext::Help => &[],
             InputContext::CommitMsg => k::BIND_COMMITMSG,
+            InputContext::Comment => k::BIND_COMMENT,
             InputContext::ThemePicker => k::BIND_THEME,
             InputContext::Palette => {
                 if self.commit_palette_open() {

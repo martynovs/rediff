@@ -2,6 +2,8 @@
 name = "rediff"
 version = "0.1.0"
 edition = "2021"
+# `File::lock`/`lock_shared`/`unlock`, used by the review log, are 1.89+.
+rust-version = "1.89"
 description = "A fast Rust TUI git-diff viewer for reviewing changes"
 license = "MIT"
 readme = "README.md"
@@ -40,6 +42,14 @@ tree-sitter-javascript = "0.25"
 syntect = "5.3"
 two-face = "0.5"
 serde = { version = "1", features = ["derive"] }
+# The review log is JSON Lines: one record per line, human-readable and
+# machine-consumable. TOML is a poor fit for an append-only log.
+serde_json = "1"
+# XXH3-64 for the review-store round content hash. `no_std`, no transitive
+# dependencies. The *variant* is part of the on-disk format — see
+# `openspec/changes/add-review-store/design.md`; never swap it for a hasher whose
+# output is unspecified across versions (std's DefaultHasher, rustc-hash).
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 strip-ansi-escapes = "0.2"
 # Terminal display-width for the blame gutter (CJK/emoji names are 2 cells wide).
 unicode-width = "0.2"

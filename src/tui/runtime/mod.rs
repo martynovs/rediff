@@ -13,3 +13,6 @@ mod peek_tests;
 mod render_tests;
 #[cfg(test)]
 mod view_tests;
+
+#[cfg(test)]
+pub(crate) use keys::handle_key as handle_key_for_test;

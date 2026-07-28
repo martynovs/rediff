@@ -29,6 +29,7 @@ fn file(path: &str, old: &str, new: &str, status: FileStatus) -> DiffFile {
         is_binary: false,
         old_text: (!old.is_empty()).then(|| old.to_string()),
         new_text: (!new.is_empty()).then(|| new.to_string()),
+        content_digest: None,
         diffed: true,
     }
 }
@@ -160,7 +161,7 @@ fn view_back_forward_restores_position() {
     let cs = big_sample();
     let mut app = App::new(&cs);
     app.viewport_h = 8;
-    app.scroll_by(6);
+    app.scroll_view(6);
     let home_scroll = app.state().scroll;
     assert!(home_scroll > 0);
 

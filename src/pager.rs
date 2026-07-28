@@ -54,6 +54,9 @@ fn render(input: &str, theme_name: ThemeName) -> String {
         let Ok(fp) = fp else { continue };
         let op = fp.operation().strip_prefix(1);
         let (path, prev, status) = describe(&op);
+        if is_review_log(&path) {
+            continue;
+        }
         file_header(&mut out, &theme, &path, prev.as_deref(), status);
 
         match fp.patch() {
@@ -165,6 +168,14 @@ pub fn external(args: &[String], theme: ThemeName) -> anyhow::Result<()> {
     let new_path = args.get(4).map_or("/dev/null", String::as_str);
     let path = display_path(args);
 
+    // rediff's own review log is never review material. git invokes this per file
+    // (that is the point of the lazygit `externalDiffCommand` setup), so without
+    // this the untracked log shows up in the combined view and the reviewer ends up
+    // reviewing rediff's record of their review.
+    if is_review_log(path) {
+        return Ok(());
+    }
+
     // Classify on just the first few KB, so a large binary blob (e.g. an added
     // video) isn't slurped whole only to print a one-line notice; full-read text.
     let old_head = read_head(old_path, BINARY_SCAN);
@@ -176,6 +187,17 @@ pub fn external(args: &[String], theme: ThemeName) -> anyhow::Result<()> {
     };
     std::io::stdout().lock().write_all(out.as_bytes())?;
     Ok(())
+}
+
+/// Whether a diff header's path names rediff's own review log at a repository
+/// root.
+///
+/// The pager sees paths as git prints them — repo-relative, `/`-separated — so a
+/// bare `rediff.jsonl` is the log and `sub/rediff.jsonl` is an ordinary file. The
+/// loader applies the same rule in `git::filter::drop_review_log`; both exist
+/// because the log is tool state, never review material.
+fn is_review_log(path: &str) -> bool {
+    path.trim_start_matches("./") == crate::review::LOG_FILE_NAME
 }
 
 /// Pick a human-readable path for the header. `arg[0]` is git's path, but for a

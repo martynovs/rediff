@@ -57,7 +57,16 @@ pub fn enumerate_in(repo: &gix::Repository, req: &LoadRequest) -> anyhow::Result
     Ok(en)
 }
 
+/// The one funnel every source and both callers (`load` and `enumerate_in`) pass
+/// through — so rediff's own review log is dropped exactly once, here, rather than
+/// at each of the five request kinds.
 fn enumerate_repo(repo: &gix::Repository, req: &LoadRequest) -> anyhow::Result<Enumeration> {
+    let mut en = enumerate_source(repo, req)?;
+    super::filter::drop_review_log(&mut en.stubs);
+    Ok(en)
+}
+
+fn enumerate_source(repo: &gix::Repository, req: &LoadRequest) -> anyhow::Result<Enumeration> {
     match req {
         LoadRequest::WorkingTree {
             include_untracked,
@@ -538,6 +547,51 @@ mod tests {
         a.sort();
         b.sort();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn untracked_review_log_is_omitted_but_its_neighbours_are_not() {
+        let dir = review_repo();
+        std::fs::write(dir.path().join("rediff.jsonl"), "{\"t\":\"open\"}\n").unwrap();
+        std::fs::write(dir.path().join("scratch.txt"), "untracked\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/rediff.jsonl"), "not the log\n").unwrap();
+        std::fs::write(dir.path().join("my-rediff.jsonl"), "nor this\n").unwrap();
+
+        let cs = load(
+            dir.path(),
+            &LoadRequest::WorkingTree {
+                include_untracked: true,
+                base: None,
+            },
+        )
+        .unwrap();
+        let paths: Vec<&str> = cs.files.iter().map(|f| f.path.as_str()).collect();
+
+        assert!(
+            !paths.contains(&"rediff.jsonl"),
+            "the review log is never review material: {paths:?}"
+        );
+        assert!(paths.contains(&"scratch.txt"), "other untracked files stay");
+        assert!(
+            paths.contains(&"sub/rediff.jsonl"),
+            "subdirectory file stays"
+        );
+        assert!(paths.contains(&"my-rediff.jsonl"), "similar name stays");
+    }
+
+    #[test]
+    fn a_committed_review_log_is_omitted_too() {
+        let dir = review_repo();
+        std::fs::write(dir.path().join("rediff.jsonl"), "{\"t\":\"open\"}\n").unwrap();
+        std::fs::write(dir.path().join("also.txt"), "sibling\n").unwrap();
+        crate::testutil::run_git(dir.path(), &["add", "-A"]);
+        crate::testutil::run_git(dir.path(), &["commit", "-qm", "commit the log by accident"]);
+
+        let cs = load(dir.path(), &LoadRequest::Show { rev: "HEAD".into() }).unwrap();
+        let paths: Vec<&str> = cs.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(!paths.contains(&"rediff.jsonl"), "even when committed");
+        assert!(paths.contains(&"also.txt"), "the rest of the commit stays");
     }
 
     #[test]

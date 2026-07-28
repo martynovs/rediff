@@ -2,3 +2,6 @@
 .cargo/target
 /tmp
 /.claude/
+
+# rediff's own review log — review points are local, not history.
+/rediff.jsonl

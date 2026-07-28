@@ -36,6 +36,21 @@ pub fn apply_stub_filter(stubs: &mut Vec<FileStub>, filters: &[String]) {
     });
 }
 
+/// Drop rediff's own review log from a set of enumeration stubs.
+///
+/// The log lives at the worktree root, so without this the reviewer sees it as a
+/// change, comments on it, and grows it — the diff reviewer reviewing its own
+/// review. It is tool state, never review material, so the omission is
+/// unconditional and not configurable, and applies to every source (a committed
+/// log is dropped just the same as an untracked one).
+///
+/// Only the root-level file is dropped: paths here are repo-relative, so a
+/// `rediff.jsonl` in a subdirectory, or a file whose name merely contains that
+/// string, is an ordinary file and stays.
+pub fn drop_review_log(stubs: &mut Vec<FileStub>) {
+    stubs.retain(|s| s.path != crate::review::LOG_FILE_NAME);
+}
+
 fn path_matches(path: &str, spec: &str) -> bool {
     let spec = spec.trim_end_matches('/');
     path == spec || path.starts_with(&format!("{spec}/"))
@@ -109,6 +124,40 @@ mod tests {
         let mut stubs = vec![renamed("new/here.rs", "old/there.rs"), stub("unrelated.rs")];
         apply_stub_filter(&mut stubs, &["old".to_string()]);
         assert_eq!(paths(&stubs), ["new/here.rs"]);
+    }
+
+    #[test]
+    fn review_log_is_dropped_only_at_the_worktree_root() {
+        let mut stubs: Vec<FileStub> = [
+            "rediff.jsonl",
+            "src/rediff.jsonl",
+            "fixtures/rediff.jsonl.golden",
+            "my-rediff.jsonl",
+            "src/main.rs",
+        ]
+        .iter()
+        .map(|p| stub(p))
+        .collect();
+
+        drop_review_log(&mut stubs);
+
+        assert_eq!(
+            paths(&stubs),
+            vec![
+                "src/rediff.jsonl",
+                "fixtures/rediff.jsonl.golden",
+                "my-rediff.jsonl",
+                "src/main.rs",
+            ],
+            "only the root-level log is tool state"
+        );
+    }
+
+    #[test]
+    fn dropping_the_review_log_is_a_no_op_when_absent() {
+        let mut stubs: Vec<FileStub> = ["a.rs", "b.rs"].iter().map(|p| stub(p)).collect();
+        drop_review_log(&mut stubs);
+        assert_eq!(paths(&stubs), vec!["a.rs", "b.rs"]);
     }
 
     #[test]

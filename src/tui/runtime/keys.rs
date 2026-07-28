@@ -47,9 +47,27 @@ pub(crate) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         InputContext::CommitMsg => handle_commit_msg_key(app, code),
         InputContext::Palette => handle_palette_key(app, code),
         InputContext::ThemePicker => handle_theme_picker_key(app, code),
+        InputContext::Comment => handle_comment_key(app, code, mods),
         // The single-file peek base captures all input while open.
         InputContext::Peek => handle_peek_key(app, code, mods),
         InputContext::Normal => handle_base_key(app, code, mods),
+    }
+}
+
+/// Composing a comment: text entry, `Enter` to save, `Esc` to discard.
+///
+/// Deliberately tiny and deliberately *not* part of `handle_global_key`, which
+/// is at CRAP 30 against a threshold of 30 and has no headroom at all.
+fn handle_comment_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    match code {
+        KeyCode::Esc => app.comment_cancel(),
+        KeyCode::Enter => app.comment_confirm(),
+        KeyCode::Backspace => app.comment_backspace(),
+        // A Ctrl chord is not text. Without this, Ctrl+C inserts a literal `c`
+        // into the one buffer whose contents get persisted.
+        KeyCode::Char(_) if mods.contains(KeyModifiers::CONTROL) => {}
+        KeyCode::Char(c) => app.comment_input(c),
+        _ => {}
     }
 }
 
@@ -70,7 +88,25 @@ fn handle_base_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     if handle_global_key(app, code, mods) {
         return;
     }
+    if handle_review_key(app, code) {
+        return;
+    }
     handle_focus_key(app, code, mods);
+}
+
+/// Review-point keys, live in either pane.
+///
+/// Its own handler rather than an arm in `handle_global_key`, which sits at CRAP
+/// 30 against a threshold of 30 — and rather than `handle_stream_key`, where
+/// they were silently dead whenever the sidebar had focus. Returns whether the
+/// key was consumed.
+fn handle_review_key(app: &mut App, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Char('a') => app.open_comment(true),
+        KeyCode::Char('A') => app.open_comment(false),
+        _ => return false,
+    }
+    true
 }
 
 /// The fuzzy palette captures all input while open. Digits pick a result; Tab
@@ -282,12 +318,12 @@ fn handle_stream_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Esc => app.should_quit = true,
         // Vertical: one line, or several with Shift (↑↓ or J/K).
-        KeyCode::Down if mods.contains(KeyModifiers::SHIFT) => app.scroll_by(BIG_STEP),
-        KeyCode::Up if mods.contains(KeyModifiers::SHIFT) => app.scroll_by(-BIG_STEP),
-        KeyCode::Char('J') => app.scroll_by(BIG_STEP),
-        KeyCode::Char('K') => app.scroll_by(-BIG_STEP),
-        KeyCode::Down | KeyCode::Char('j') => app.scroll_by(1),
-        KeyCode::Up | KeyCode::Char('k') => app.scroll_by(-1),
+        KeyCode::Down if mods.contains(KeyModifiers::SHIFT) => app.scroll_view(BIG_STEP),
+        KeyCode::Up if mods.contains(KeyModifiers::SHIFT) => app.scroll_view(-BIG_STEP),
+        KeyCode::Char('J') => app.scroll_view(BIG_STEP),
+        KeyCode::Char('K') => app.scroll_view(-BIG_STEP),
+        KeyCode::Down | KeyCode::Char('j') => app.move_cursor(1),
+        KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
         KeyCode::PageDown => app.page(1),
         KeyCode::PageUp => app.page(-1),
         KeyCode::Char(']') => app.next_hunk(),

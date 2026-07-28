@@ -95,12 +95,13 @@ impl App {
         if let Some(dir) = self.state().selected_dir.clone() {
             self.unfold_dir(&dir);
         } else {
-            #[expect(
-                clippy::indexing_slicing,
-                reason = "in the else branch the cursor is on a file, so `selected` is a valid file index"
-            )]
-            let dir =
-                crate::model::parent_dir(&self.cs().files[self.state().selected].path).to_string();
+            // `.get`, not indexing: with an empty changeset `selected` is 0 and
+            // `selected_file()` still answers `Some(0)`, so `rediff` on a clean
+            // tree panicked on `z`.
+            let Some(f) = self.cs().files.get(self.state().selected) else {
+                return;
+            };
+            let dir = crate::model::parent_dir(&f.path).to_string();
             self.fold_dir(&dir);
         }
     }
@@ -186,22 +187,35 @@ impl App {
         self.clamp();
     }
 
-    pub fn scroll_by(&mut self, delta: isize) {
+    /// Move the line cursor by `delta` (`j`/`k`, the arrows), viewport following.
+    pub fn move_cursor(&mut self, delta: isize) {
         let vh = self.viewport_h;
         let e = self.session.cur_mut();
-        stream::scroll_by(&mut e.state, &e.plan, vh, delta);
+        let usable = stream::usable(&e.plan, vh);
+        stream::move_cursor_by(&mut e.state, &e.plan, usable, delta);
+    }
+
+    /// Scroll the viewport by `delta` (`J`/`K`, Shift+arrows, the mouse wheel),
+    /// carrying the cursor so it keeps its row on screen.
+    pub fn scroll_view(&mut self, delta: isize) {
+        let vh = self.viewport_h;
+        let e = self.session.cur_mut();
+        let usable = stream::usable(&e.plan, vh);
+        stream::scroll_view_by(&mut e.state, &e.plan, usable, delta);
     }
 
     pub fn page(&mut self, dir: isize) {
         let vh = self.viewport_h;
         let e = self.session.cur_mut();
-        stream::page(&mut e.state, &e.plan, vh, dir);
+        let usable = stream::usable(&e.plan, vh);
+        stream::page(&mut e.state, &e.plan, usable, dir);
     }
 
     pub fn half_page(&mut self, dir: isize) {
         let vh = self.viewport_h;
         let e = self.session.cur_mut();
-        stream::half_page(&mut e.state, &e.plan, vh, dir);
+        let usable = stream::usable(&e.plan, vh);
+        stream::half_page(&mut e.state, &e.plan, usable, dir);
     }
 
     pub fn top(&mut self) {
@@ -212,7 +226,8 @@ impl App {
     pub fn bottom(&mut self) {
         let vh = self.viewport_h;
         let e = self.session.cur_mut();
-        stream::bottom(&mut e.state, &e.plan, vh);
+        let usable = stream::usable(&e.plan, vh);
+        stream::bottom(&mut e.state, &e.plan, usable);
     }
 
     /// Index of the file currently at the top of the viewport.
@@ -223,13 +238,15 @@ impl App {
     pub fn next_hunk(&mut self) {
         let vh = self.viewport_h;
         let e = self.session.cur_mut();
-        stream::next_hunk(&mut e.state, &e.plan, vh);
+        let usable = stream::usable(&e.plan, vh);
+        stream::next_hunk(&mut e.state, &e.plan, usable);
     }
 
     pub fn prev_hunk(&mut self) {
         let vh = self.viewport_h;
         let e = self.session.cur_mut();
-        stream::prev_hunk(&mut e.state, &e.plan, vh);
+        let usable = stream::usable(&e.plan, vh);
+        stream::prev_hunk(&mut e.state, &e.plan, usable);
     }
 
     /// Step the cursor through the navigable sequence (visible files + collapsed
@@ -252,10 +269,11 @@ impl App {
     fn sync_body_to_selection(&mut self) {
         let vh = self.viewport_h;
         let e = self.session.cur_mut();
+        let usable = stream::usable(&e.plan, vh);
         let sel = e.state.selected;
         match e.state.selected_dir.clone() {
-            Some(dir) => stream::jump_to_collapsed(&mut e.state, &e.plan, vh, &dir),
-            None => stream::jump_to_file(&mut e.state, &e.plan, vh, sel),
+            Some(dir) => stream::jump_to_collapsed(&mut e.state, &e.plan, usable, &dir),
+            None => stream::jump_to_file(&mut e.state, &e.plan, usable, sel),
         }
     }
 
@@ -272,7 +290,8 @@ impl App {
     pub fn jump_to_file(&mut self, idx: usize) {
         let vh = self.viewport_h;
         let e = self.session.cur_mut();
-        stream::jump_to_file(&mut e.state, &e.plan, vh, idx);
+        let usable = stream::usable(&e.plan, vh);
+        stream::jump_to_file(&mut e.state, &e.plan, usable, idx);
     }
 
     /// Go to a file by index: jump the stream, select it, and focus the stream.
@@ -430,11 +449,12 @@ impl App {
         // Auto-collapse: when this toggle completes the file's directory (its last
         // unreviewed file just became reviewed), fold it once — only in a grouped
         // review, and only on the completion edge (re-expanding by hand sticks).
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "idx comes from selected_file() (Some), so it is a valid file index"
-        )]
-        let dir = crate::model::parent_dir(&self.cs().files[idx].path).to_string();
+        // Same empty-changeset hazard as `toggle_fold`: `selected_file()` answers
+        // `Some(0)` even with no files.
+        let Some(f) = self.cs().files.get(idx) else {
+            return;
+        };
+        let dir = crate::model::parent_dir(&f.path).to_string();
         let auto = self.grouped()
             && self.state().viewed.get(idx).copied().unwrap_or(false)
             && !self.state().collapsed.contains(&dir)

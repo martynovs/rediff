@@ -24,6 +24,7 @@ fn file(path: &str, old: &str, new: &str, status: FileStatus) -> DiffFile {
         is_binary: false,
         old_text: (!old.is_empty()).then(|| old.to_string()),
         new_text: (!new.is_empty()).then(|| new.to_string()),
+        content_digest: None,
         diffed: true,
     }
 }
@@ -167,9 +168,9 @@ fn ctrl_f_b_half_page() {
     let mut app = App::new(&cs);
     app.viewport_h = 10;
     handle_key(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    assert_eq!(app.state().scroll, 5, "ctrl-f scrolls half a page down");
+    assert_eq!(app.state().cursor_row, 4, "ctrl-f moves half a page down");
     handle_key(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
-    assert_eq!(app.state().scroll, 0, "ctrl-b scrolls half a page up");
+    assert_eq!(app.state().cursor_row, 0, "ctrl-b moves half a page up");
 }
 
 #[test]
@@ -340,13 +341,19 @@ fn stream_keys_cover_paging_hunks_and_extremes() {
     assert_eq!(app.focus(), Focus::Stream);
 
     handle_key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
-    assert!(app.state().scroll > 0, "PageDown advances the stream");
+    assert!(app.state().cursor_row > 0, "PageDown advances the stream");
     handle_key(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
-    assert_eq!(app.state().scroll, 0, "PageUp returns to the top");
+    assert_eq!(app.state().cursor_row, 0, "PageUp returns to the top");
 
+    // Hunk jumps still top-align the viewport, and now place the cursor too.
     handle_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE);
     let after_hunk = app.state().scroll;
     assert!(after_hunk > 0, "] jumps to the next hunk");
+    assert_eq!(
+        app.state().cursor_row,
+        after_hunk,
+        "and the cursor lands on it"
+    );
     handle_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE);
     assert!(app.state().scroll <= after_hunk, "[ steps back a hunk");
 
@@ -621,10 +628,12 @@ fn ctrl_d_u_half_page_and_unbound_ctrl_is_ignored() {
     let mut app = App::new(&cs);
     app.viewport_h = 10;
     // ctrl+d / ctrl+u share the f/b half-page arms.
+    // A half page is half the *drawn* height, and the cursor is what moves —
+    // the viewport follows only once the cursor would leave it.
     handle_key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
-    assert_eq!(app.state().scroll, 5, "ctrl+d half-pages down");
+    assert_eq!(app.state().cursor_row, 4, "ctrl+d half-pages down");
     handle_key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
-    assert_eq!(app.state().scroll, 0, "ctrl+u half-pages up");
+    assert_eq!(app.state().cursor_row, 0, "ctrl+u half-pages up");
     // An unbound Ctrl chord hits the `_` arm: a no-op.
     let before = app.state().selected;
     handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);

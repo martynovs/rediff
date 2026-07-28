@@ -93,6 +93,51 @@ pub enum Command {
         )]
         args: Vec<String>,
     },
+    /// Open a review over the current changes and exit — the non-interactive
+    /// request an agent makes for a human review. Writes `rediff.jsonl` at the
+    /// worktree root; read the result back with `rediff feedback`.
+    Request {
+        /// Review staged changes only (HEAD vs index).
+        #[arg(long)]
+        staged: bool,
+        /// Exclude untracked files from a working-tree review.
+        #[arg(long)]
+        exclude_untracked: bool,
+        /// Review everything since this ref — commits *and* uncommitted work — as
+        /// one changeset. (Note this is `diff --from`, not `review --from`: it
+        /// ends at the working tree, not at another ref.)
+        #[arg(long = "from", value_name = "REF")]
+        from: Option<String>,
+        /// Repository directory to open (defaults to the current directory).
+        #[arg(short = 'C', long = "repo", value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// Human-facing label, e.g. which agent opened the review.
+        #[arg(long, value_name = "TEXT")]
+        label: Option<String>,
+        /// A range (`old..new`) and/or a repo directory. Path filters are not
+        /// accepted: a review covers everything that changed under its target.
+        #[arg(value_name = "RANGE|DIR")]
+        targets: Vec<String>,
+    },
+    /// Report the worktree's review state (open review, round, pending feedback).
+    ReviewStatus {
+        /// Repository directory to open (defaults to the current directory).
+        #[arg(short = 'C', long = "repo", value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// Emit JSON instead of a human-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drain the review's feedback as JSON — the agent's read side.
+    Feedback {
+        /// Repository directory to open (defaults to the current directory).
+        #[arg(short = 'C', long = "repo", value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// Replay every item with its delivery status instead of draining the
+        /// undelivered ones. Records nothing.
+        #[arg(long)]
+        all: bool,
+    },
     /// Review the changes introduced by a commit (default HEAD).
     Show {
         /// Repository directory to open (defaults to the current directory).
@@ -124,25 +169,202 @@ pub struct Resolved {
     pub review: bool,
 }
 
+/// The flags every repo-opening subcommand shares, borrowed for resolution.
+///
+/// Grouping them keeps each `resolve_*` helper under the argument-count lint and,
+/// more usefully, lets the two target-scanning loops be shared rather than
+/// re-derived per subcommand.
+struct Common<'a> {
+    repo: &'a Option<PathBuf>,
+    mode: &'a Option<String>,
+    theme: &'a Option<String>,
+    targets: &'a [String],
+}
+
+impl Common<'_> {
+    /// The repository directory before positional arguments are considered.
+    fn seed_repo_dir(&self, cwd: &Path) -> PathBuf {
+        self.repo.clone().unwrap_or_else(|| cwd.to_path_buf())
+    }
+}
+
+/// Scan positionals for `review`/`show`: a repo root, then the first argument
+/// that is not an existing path (a ref/sha), then path filters.
+fn scan_rev_targets(c: &Common, cwd: &Path) -> (PathBuf, Option<String>, Vec<String>) {
+    let mut repo_dir = c.seed_repo_dir(cwd);
+    let mut rev: Option<String> = None;
+    let mut filters = Vec::new();
+    for t in c.targets {
+        if c.repo.is_none() && is_repo_root(t) {
+            repo_dir = PathBuf::from(t);
+        } else if rev.is_none() && !Path::new(t).exists() {
+            // A ref/sha doesn't exist as a filesystem path.
+            rev = Some(t.clone());
+        } else {
+            filters.push(t.clone());
+        }
+    }
+    (repo_dir, rev, filters)
+}
+
+/// Scan positionals for `diff`: a repo root, an `a..b` range, then path filters.
+fn scan_diff_targets(c: &Common, cwd: &Path) -> (PathBuf, Option<String>, Vec<String>) {
+    let mut repo_dir = c.seed_repo_dir(cwd);
+    let mut range: Option<String> = None;
+    let mut filters = Vec::new();
+    for t in c.targets {
+        if t.contains("..") {
+            range = Some(t.clone());
+        } else if c.repo.is_none() && is_repo_root(t) {
+            repo_dir = PathBuf::from(t);
+        } else {
+            filters.push(t.clone());
+        }
+    }
+    (repo_dir, range, filters)
+}
+
+/// `rediff` with no subcommand: the working tree, untracked included.
+fn resolve_default(cwd: &Path) -> Resolved {
+    Resolved {
+        repo_dir: cwd.to_path_buf(),
+        req: LoadRequest::WorkingTree {
+            include_untracked: true,
+            base: None,
+        },
+        filters: Vec::new(),
+        mode: None,
+        theme: None,
+        review: true,
+    }
+}
+
+fn resolve_diff(
+    cwd: &Path,
+    c: &Common,
+    staged: bool,
+    exclude_untracked: bool,
+    from: Option<&str>,
+) -> Resolved {
+    let (repo_dir, range, filters) = scan_diff_targets(c, cwd);
+    let req = match (range, staged) {
+        (Some(r), _) => {
+            let (old, new) = split_range(&r);
+            LoadRequest::Range { old, new }
+        }
+        (None, true) => LoadRequest::Staged,
+        (None, false) => LoadRequest::WorkingTree {
+            include_untracked: !exclude_untracked,
+            base: from.map(ToString::to_string),
+        },
+    };
+    Resolved {
+        repo_dir,
+        req,
+        filters,
+        mode: c.mode.clone(),
+        theme: c.theme.clone(),
+        review: true,
+    }
+}
+
+fn resolve_review(cwd: &Path, c: &Common, from: Option<&str>) -> Resolved {
+    let (repo_dir, target, filters) = scan_rev_targets(c, cwd);
+    let target = target.unwrap_or_else(|| "HEAD".to_string());
+    let req = match from {
+        Some(base) => LoadRequest::ReviewRange {
+            base: base.to_string(),
+            target,
+        },
+        None => LoadRequest::Show { rev: target },
+    };
+    Resolved {
+        repo_dir,
+        req,
+        filters,
+        mode: c.mode.clone(),
+        theme: c.theme.clone(),
+        review: true,
+    }
+}
+
+/// `request` accepts every target the viewer does, and **no** path filters — which
+/// is what makes its scan unambiguous: a positional that is neither a range nor a
+/// repo root can only be a revision. Reusing `resolve_diff` here classified
+/// `rediff request HEAD~1` as a filter and rejected it, so `show:<rev>` was a
+/// target the codec supported but no invocation could produce.
+fn resolve_request(
+    cwd: &Path,
+    c: &Common,
+    staged: bool,
+    exclude_untracked: bool,
+    from: Option<&str>,
+) -> Resolved {
+    let mut repo_dir = c.seed_repo_dir(cwd);
+    let mut range: Option<String> = None;
+    let mut rev: Option<String> = None;
+    let mut filters = Vec::new();
+    for t in c.targets {
+        if t.contains("..") {
+            range = Some(t.clone());
+        } else if c.repo.is_none() && is_repo_root(t) {
+            repo_dir = PathBuf::from(t);
+        } else if rev.is_none() && !t.ends_with('/') && !Path::new(t).exists() {
+            // A ref/sha doesn't exist as a filesystem path — the same heuristic
+            // `show`/`review` use — and cannot end in `/`, which git forbids in a
+            // ref name. Anything else is a path the caller meant as a filter, and
+            // is collected so the command can reject it with a message about
+            // filters rather than an opaque git revision error.
+            rev = Some(t.clone());
+        } else {
+            filters.push(t.clone());
+        }
+    }
+    let req = match (range, rev, staged) {
+        (Some(r), _, _) => {
+            let (old, new) = split_range(&r);
+            LoadRequest::Range { old, new }
+        }
+        (None, Some(rev), _) => LoadRequest::Show { rev },
+        (None, None, true) => LoadRequest::Staged,
+        (None, None, false) => LoadRequest::WorkingTree {
+            include_untracked: !exclude_untracked,
+            base: from.map(ToString::to_string),
+        },
+    };
+    Resolved {
+        repo_dir,
+        req,
+        filters,
+        mode: None,
+        theme: None,
+        review: true,
+    }
+}
+
+fn resolve_show(cwd: &Path, c: &Common) -> Resolved {
+    let (repo_dir, rev, filters) = scan_rev_targets(c, cwd);
+    Resolved {
+        repo_dir,
+        req: LoadRequest::Show {
+            rev: rev.unwrap_or_else(|| "HEAD".to_string()),
+        },
+        filters,
+        mode: c.mode.clone(),
+        theme: c.theme.clone(),
+        review: false,
+    }
+}
+
 impl Cli {
     /// Resolve the parsed CLI against the current working directory.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one flat per-subcommand resolution table; each arm reads top-to-bottom and a split would scatter the target-parsing rules"
-    )]
+    ///
+    /// A dispatcher only: each subcommand's rules live in its own `resolve_*`
+    /// helper. Keeping this flat would be more readable in isolation, but the
+    /// combined branch count runs into the CRAP gate as subcommands are added.
     pub fn resolve(&self, cwd: &Path) -> Resolved {
         match &self.command {
-            None => Resolved {
-                repo_dir: cwd.to_path_buf(),
-                req: LoadRequest::WorkingTree {
-                    include_untracked: true,
-                    base: None,
-                },
-                filters: Vec::new(),
-                mode: None,
-                theme: None,
-                review: true,
-            },
+            None => resolve_default(cwd),
             // `pager` is a non-interactive stdin→stdout filter handled in `main`
             // before `resolve` is ever called; it has no repo/view to resolve.
             #[expect(
@@ -163,105 +385,87 @@ impl Cli {
                 mode,
                 theme,
                 targets,
-            }) => {
-                let mut repo_dir = repo.clone().unwrap_or_else(|| cwd.to_path_buf());
-                let mut range: Option<String> = None;
-                let mut filters = Vec::new();
-                for t in targets {
-                    if t.contains("..") {
-                        range = Some(t.clone());
-                    } else if repo.is_none() && is_repo_root(t) {
-                        repo_dir = PathBuf::from(t);
-                    } else {
-                        filters.push(t.clone());
-                    }
-                }
-                let req = match (range, *staged) {
-                    (Some(r), _) => {
-                        let (old, new) = split_range(&r);
-                        LoadRequest::Range { old, new }
-                    }
-                    (None, true) => LoadRequest::Staged,
-                    (None, false) => LoadRequest::WorkingTree {
-                        include_untracked: !exclude_untracked,
-                        base: from.clone(),
-                    },
-                };
-                Resolved {
-                    repo_dir,
-                    req,
-                    filters,
-                    mode: mode.clone(),
-                    theme: theme.clone(),
-                    review: true,
-                }
-            }
+            }) => resolve_diff(
+                cwd,
+                &Common {
+                    repo,
+                    mode,
+                    theme,
+                    targets,
+                },
+                *staged,
+                *exclude_untracked,
+                from.as_deref(),
+            ),
             Some(Command::Review {
                 from,
                 repo,
                 mode,
                 theme,
                 targets,
+            }) => resolve_review(
+                cwd,
+                &Common {
+                    repo,
+                    mode,
+                    theme,
+                    targets,
+                },
+                from.as_deref(),
+            ),
+            // `--from` here means `WorkingTree { base }` (as on `diff`), not the
+            // `ReviewRange` that `review --from` builds.
+            Some(Command::Request {
+                staged,
+                exclude_untracked,
+                from,
+                repo,
+                targets,
+                ..
             }) => {
-                let mut repo_dir = repo.clone().unwrap_or_else(|| cwd.to_path_buf());
-                let mut target: Option<String> = None;
-                let mut filters = Vec::new();
-                for t in targets {
-                    if repo.is_none() && is_repo_root(t) {
-                        repo_dir = PathBuf::from(t);
-                    } else if target.is_none() && !Path::new(t).exists() {
-                        target = Some(t.clone());
-                    } else {
-                        filters.push(t.clone());
-                    }
-                }
-                let target = target.unwrap_or_else(|| "HEAD".to_string());
-                let req = match from {
-                    Some(base) => LoadRequest::ReviewRange {
-                        base: base.clone(),
-                        target,
+                let none = None;
+                resolve_request(
+                    cwd,
+                    &Common {
+                        repo,
+                        mode: &none,
+                        theme: &none,
+                        targets,
                     },
-                    None => LoadRequest::Show { rev: target },
-                };
-                Resolved {
-                    repo_dir,
-                    req,
-                    filters,
-                    mode: mode.clone(),
-                    theme: theme.clone(),
-                    review: true,
-                }
+                    *staged,
+                    *exclude_untracked,
+                    from.as_deref(),
+                )
             }
+            // Neither takes a target: both are dispatched in `main` before
+            // `resolve` runs, so unlike `pager`/`external` there is nothing here
+            // that could be reached.
+            #[expect(
+                clippy::unreachable,
+                reason = "review-status is dispatched in main before resolve()"
+            )]
+            Some(Command::ReviewStatus { .. }) => {
+                unreachable!("review-status is handled before resolve()")
+            }
+            #[expect(
+                clippy::unreachable,
+                reason = "feedback is dispatched in main before resolve()"
+            )]
+            Some(Command::Feedback { .. }) => unreachable!("feedback is handled before resolve()"),
             Some(Command::Show {
                 repo,
                 mode,
                 theme,
                 targets,
-            }) => {
-                let mut repo_dir = repo.clone().unwrap_or_else(|| cwd.to_path_buf());
-                let mut rev: Option<String> = None;
-                let mut filters = Vec::new();
-                for t in targets {
-                    if repo.is_none() && is_repo_root(t) {
-                        repo_dir = PathBuf::from(t);
-                    } else if rev.is_none() && !Path::new(t).exists() {
-                        // A ref/sha doesn't exist as a filesystem path.
-                        rev = Some(t.clone());
-                    } else {
-                        filters.push(t.clone());
-                    }
-                }
-                Resolved {
-                    repo_dir,
-                    req: LoadRequest::Show {
-                        rev: rev.unwrap_or_else(|| "HEAD".to_string()),
-                    },
-                    filters,
-                    mode: mode.clone(),
-                    theme: theme.clone(),
-                    review: false,
-                }
-            }
+            }) => resolve_show(
+                cwd,
+                &Common {
+                    repo,
+                    mode,
+                    theme,
+                    targets,
+                },
+            ),
         }
     }
 }
@@ -315,6 +519,69 @@ mod tests {
     }
 
     // --- split_range ----------------------------------------------------
+
+    #[test]
+    fn request_resolves_every_target_it_accepts() {
+        let cwd = std::path::Path::new(".");
+        let r = |targets: &[&str], staged, from: Option<&str>| {
+            let owned: Vec<String> = targets.iter().map(|s| (*s).to_string()).collect();
+            let no_repo: Option<PathBuf> = None;
+            let no_str: Option<String> = None;
+            resolve_request(
+                cwd,
+                &Common {
+                    repo: &no_repo,
+                    mode: &no_str,
+                    theme: &no_str,
+                    targets: &owned,
+                },
+                staged,
+                false,
+                from,
+            )
+        };
+
+        // A bare rev is a target, not a filter — the bug this guards.
+        assert_eq!(
+            r(&["HEAD~1"], false, None).req,
+            LoadRequest::Show {
+                rev: "HEAD~1".into()
+            }
+        );
+        assert_eq!(
+            r(&["main..HEAD"], false, None).req,
+            LoadRequest::Range {
+                old: "main".into(),
+                new: "HEAD".into()
+            }
+        );
+        assert_eq!(r(&[], true, None).req, LoadRequest::Staged);
+        assert_eq!(
+            r(&[], false, Some("main")).req,
+            LoadRequest::WorkingTree {
+                include_untracked: true,
+                base: Some("main".into())
+            }
+        );
+        assert_eq!(
+            r(&[], false, None).req,
+            LoadRequest::WorkingTree {
+                include_untracked: true,
+                base: None
+            }
+        );
+
+        // A trailing slash can never be a ref, and an existing path is obviously
+        // not one either: both are collected so the command can reject them with a
+        // message about filters rather than an opaque git error.
+        assert_eq!(r(&["src/"], false, None).filters, vec!["src/"]);
+        assert_eq!(r(&["Cargo.toml"], false, None).filters, vec!["Cargo.toml"]);
+
+        // A second rev-looking positional is a filter too, not a silent override.
+        let two = r(&["HEAD", "HEAD~1"], false, None);
+        assert_eq!(two.req, LoadRequest::Show { rev: "HEAD".into() });
+        assert_eq!(two.filters, vec!["HEAD~1"]);
+    }
 
     #[test]
     fn split_range_old_and_new() {

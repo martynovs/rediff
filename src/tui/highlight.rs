@@ -186,6 +186,7 @@ mod tests {
             is_binary: false,
             old_text: Some("fn a() {}\n".into()),
             new_text: Some("fn b() {}\n".into()),
+            content_digest: None,
             diffed: true,
         }
     }

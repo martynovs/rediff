@@ -18,6 +18,16 @@ use crate::tui::rows::Plan;
 pub struct ViewState {
     /// Viewport top (row index into the active plan).
     pub scroll: usize,
+    /// The line cursor: the row of the active plan the user is pointing at.
+    ///
+    /// Named `cursor_row`, not `cursor`, because two other things in this module
+    /// tree are already called that: `Session.cursor` is the active view in the
+    /// stack, and `selected`/`selected_dir` are the sidebar's cursor.
+    ///
+    /// The single-file peek shares this struct but **does not read this field** —
+    /// its renderer drops rows, so a cursor there needs a row→drawn-line mapping
+    /// the stream does not. It stays 0 for a peek.
+    pub cursor_row: usize,
     /// Horizontal scroll offset (columns) for long lines when not wrapping.
     pub h_scroll: usize,
     /// Wrap long lines instead of horizontal-scrolling (stack layout only).
@@ -160,14 +170,11 @@ pub struct ViewEntry {
     /// `None` falls back to the kind's default (HEAD / commit parent / range
     /// merge-base). Used to source the peek's old side for an undiffed file.
     pub base: Option<String>,
-    /// How to (re)enumerate this view's changeset from git. Retained for a future
-    /// explicit reload action: under snapshot semantics a view's file set is fixed
-    /// for its lifetime (resume re-diffs the view's own stubs, never re-enumerates),
-    /// so nothing reads this today — an explicit reload would.
-    #[expect(
-        dead_code,
-        reason = "retained for a future explicit reload action; nothing reads it today"
-    )]
+    /// How to (re)enumerate this view's changeset from git. Read by the review
+    /// integration, which encodes it as the review's target so a TUI-opened
+    /// review is indistinguishable from an agent-opened one. Under snapshot
+    /// semantics a view's file set is fixed for its lifetime, so nothing
+    /// re-enumerates from it; an explicit reload action would.
     pub req: Option<LoadRequest>,
     /// The view's enumerated file stubs, index-aligned with `cs.files` and fixed
     /// for the view's lifetime. A resumed load re-diffs only the stubs whose

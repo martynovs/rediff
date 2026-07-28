@@ -83,6 +83,9 @@ fn build_diffed(stub: &FileStub, old: Option<&[u8]>, new: Option<&[u8]>) -> Diff
         } else {
             Some(new_full)
         },
+        // From the raw bytes, so a binary file — which carries no text — still has
+        // a fingerprint the review store's rounds can compare across passes.
+        content_digest: new.map(crate::review::content_hash),
         diffed: true,
     }
 }

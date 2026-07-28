@@ -28,6 +28,7 @@ fn file(path: &str, old: &str, new: &str, status: FileStatus) -> DiffFile {
         is_binary: false,
         old_text: (!old.is_empty()).then(|| old.to_string()),
         new_text: (!new.is_empty()).then(|| new.to_string()),
+        content_digest: None,
         diffed: true,
     }
 }

@@ -76,6 +76,9 @@ pub enum Overlay {
     ThemePicker(ThemePicker),
     /// The shared commit-message popup (from the picker's `Tab` or a blame line).
     CommitMessage(CommitMsg),
+    /// Composing a review comment. Pushed over whatever summoned it, so editing
+    /// a thread from the thread list returns to the list.
+    Comment(CommentInput),
 }
 
 /// Which surface captures input right now, resolved by [`App::active_context`]
@@ -87,8 +90,51 @@ pub enum InputContext {
     CommitMsg,
     Palette,
     ThemePicker,
+    Comment,
     Peek,
     Normal,
+}
+
+/// Composing a review comment.
+///
+/// One line, like the palette's query — a review point is a sentence, and
+/// anything longer belongs in the agent's reply. `anchor` is `None` for the
+/// review-level comment the store models as an unanchored thread.
+pub struct CommentInput {
+    /// The line this comment is about, or `None` for a review-level comment.
+    pub anchor: Option<crate::review::Anchor>,
+    /// What the user has typed so far.
+    pub buffer: String,
+    /// Set when editing an existing thread: the id whose record this supersedes.
+    pub replacing: Option<String>,
+    /// Why the last save attempt was refused, shown inside the box.
+    ///
+    /// Not `App::flash`: `draw_status` suppresses the flash whenever an overlay
+    /// is active, so a refusal reported that way is invisible at exactly the
+    /// moment the input stays open to report it.
+    pub refusal: Option<String>,
+}
+
+impl CommentInput {
+    /// A fresh comment on `anchor` (or on the review, when `None`).
+    pub fn new(anchor: Option<crate::review::Anchor>) -> Self {
+        Self {
+            anchor,
+            buffer: String::new(),
+            replacing: None,
+            refusal: None,
+        }
+    }
+
+    /// The one-line summary shown in the overlay's title.
+    pub fn title(&self) -> String {
+        match (&self.anchor, &self.replacing) {
+            (Some(a), None) => format!("comment on {}:{}", a.path, a.line),
+            (Some(a), Some(_)) => format!("edit comment on {}:{}", a.path, a.line),
+            (None, None) => "comment on this review".to_string(),
+            (None, Some(_)) => "edit review comment".to_string(),
+        }
+    }
 }
 
 /// The commit-message popup: a commit's full message, scrolled independently.
@@ -208,5 +254,13 @@ pub struct App {
     /// A transient one-line status note (e.g. next-unviewed's "N hidden in folded
     /// dirs" cue), shown until the next key clears it.
     pub flash: Option<String>,
+    /// The worktree's review log, resolved once at launch. `None` when the app
+    /// was not launched from a worktree (or in tests that do not need one).
+    pub review_log: Option<crate::review::Log>,
+    /// Whether the launch view was narrowed by path filters. Only the launch
+    /// view can be: every pushed view loads a whole target. A round hashed over
+    /// a subset would make the next unfiltered `rediff request` report every
+    /// excluded file as added, so a filtered view refuses to open a review.
+    pub launch_filtered: bool,
     pub should_quit: bool,
 }

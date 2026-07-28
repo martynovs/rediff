@@ -10,6 +10,8 @@ pub mod lang;
 pub mod model;
 pub mod pager;
 pub mod render;
+pub mod review;
+pub mod reviewcli;
 #[cfg(test)]
 mod testutil;
 pub mod tui;

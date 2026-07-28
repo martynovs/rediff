@@ -74,6 +74,7 @@ fn dfile(path: &str) -> DiffFile {
         is_binary: false,
         old_text: None,
         new_text: None,
+        content_digest: None,
         diffed: true,
     }
 }
@@ -421,4 +422,98 @@ fn toggle_viewed_auto_collapses_and_parks_when_nothing_left() {
         Some("lib"),
         "nothing left to review → parks on the new placeholder"
     );
+}
+
+#[cfg(test)]
+mod cursor_selection_tests {
+    use crate::model::{Changeset, DiffFile, FileStatus, Hunk, LayoutMode, Line, LineKind, Stats};
+    use crate::tui::app::App;
+
+    fn one_line_file(path: &str) -> DiffFile {
+        DiffFile {
+            path: path.into(),
+            previous_path: None,
+            status: FileStatus::Modified,
+            staged: false,
+            hunks: vec![Hunk {
+                old_start: 1,
+                old_len: 1,
+                new_start: 1,
+                new_len: 1,
+                lines: vec![Line {
+                    kind: LineKind::Added,
+                    old_lineno: None,
+                    new_lineno: Some(1),
+                    text: "x".into(),
+                    emphasis: None,
+                }],
+            }],
+            stats: Stats {
+                additions: 1,
+                deletions: 0,
+            },
+            language: None,
+            is_binary: false,
+            old_text: None,
+            new_text: None,
+            content_digest: None,
+            diffed: true,
+        }
+    }
+
+    #[test]
+    fn stepping_off_a_folded_placeholder_and_back_keeps_it_selected() {
+        // `file_starts` has no entry for a folded directory, so naming the
+        // cursor's file on a placeholder answers with whichever file precedes
+        // it — which clears `selected_dir` and makes `z` fold *that* directory
+        // instead of unfolding the one under the cursor.
+        let cs = Changeset {
+            source: "wt".into(),
+            files: vec![
+                one_line_file("lib/d.rs"),
+                one_line_file("src/a.rs"),
+                one_line_file("src/b.rs"),
+            ],
+        };
+        let mut app = App::with_mode(&cs, LayoutMode::Stack);
+        app.viewport_h = 20;
+        app.toggle_fold_dir("src");
+        let placeholder = app.state().cursor_row;
+        assert_eq!(app.state().selected_dir.as_deref(), Some("src"));
+
+        app.move_cursor(1);
+        app.move_cursor(-1);
+        assert_eq!(app.state().cursor_row, placeholder, "back on the same row");
+        assert_eq!(
+            app.state().selected_dir.as_deref(),
+            Some("src"),
+            "and still selecting the placeholder, so `z` unfolds"
+        );
+
+        // The verb the accepted requirement promises: unfold, not fold.
+        app.toggle_fold();
+        assert!(
+            !app.state().collapsed.contains("src"),
+            "z on the placeholder unfolds src"
+        );
+        assert!(
+            !app.state().collapsed.contains("lib"),
+            "and does not fold the neighbouring directory"
+        );
+    }
+
+    #[test]
+    fn an_empty_changeset_survives_the_file_actions() {
+        // `rediff` on a clean tree: `selected` is 0 and `selected_file()` still
+        // answers `Some(0)`, so indexing `cs.files` panicked the TUI.
+        let cs = Changeset {
+            source: "wt".into(),
+            files: Vec::new(),
+        };
+        let mut app = App::with_mode(&cs, LayoutMode::Stack);
+        app.toggle_fold();
+        app.toggle_viewed();
+        app.fold_all();
+        assert!(app.state().collapsed.is_empty(), "nothing to fold");
+    }
 }

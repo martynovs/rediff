@@ -134,6 +134,14 @@ pub struct DiffFile {
     /// absent side).
     pub old_text: Option<String>,
     pub new_text: Option<String>,
+    /// Content hash of the raw new-side bytes, when this file has been diffed and
+    /// has a new side.
+    ///
+    /// Taken from the bytes rather than [`new_text`](Self::new_text) so that a
+    /// **binary** file — which carries no text — still has a fingerprint. The review
+    /// store's rounds use it to tell whether a file moved between passes; without it
+    /// a changed binary looks unchanged.
+    pub content_digest: Option<u64>,
     /// Whether this file's diff (hunks, stats, text, binary flag) has been
     /// computed. A streaming load lists files as undiffed stubs first and fills
     /// each one in as its background diff completes. Navigation treats an
@@ -162,6 +170,7 @@ impl DiffFile {
             is_binary: false,
             old_text: None,
             new_text: None,
+            content_digest: None,
             diffed: false,
         }
     }
@@ -172,6 +181,20 @@ impl DiffFile {
 pub struct Changeset {
     pub source: String,
     pub files: Vec<DiffFile>,
+}
+
+impl Changeset {
+    /// Whether every file's diff has been computed.
+    ///
+    /// A streaming load lists files as stubs first and fills each in as its
+    /// background diff completes, so mid-load a changeset carries entries with no
+    /// content at all. Consumers that read content — the review store's round
+    /// hashes and its anchor resolution — must not mistake "not computed yet" for
+    /// "no content", so they check this first.
+    #[must_use]
+    pub fn fully_diffed(&self) -> bool {
+        self.files.iter().all(|f| f.diffed)
+    }
 }
 
 /// One commit's metadata, for the in-TUI commit picker.

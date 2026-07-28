@@ -107,6 +107,8 @@ impl App {
             sidebar_area: Rect::default(),
             hl,
             flash: None,
+            review_log: None,
+            launch_filtered: false,
             should_quit: false,
         }
     }
@@ -365,10 +367,21 @@ impl App {
         self.hl.set_theme(self.theme.name);
     }
 
+    /// Attach the worktree's review log and record whether the launch view was
+    /// narrowed by path filters. Called once, from `tui::run`.
+    pub fn attach_review_log(&mut self, log: Option<crate::review::Log>, filtered: bool) {
+        self.review_log = log;
+        self.launch_filtered = filtered;
+    }
+
     pub fn clamp(&mut self) {
         let (vh, vw) = (self.viewport_h, self.viewport_w);
         let e = self.session.cur_mut();
-        stream::clamp(&mut e.state, &e.plan, vh, vw);
+        // `usable`, not `vh`: this runs on every draw, so clamping against the
+        // full viewport here would silently undo every bound computed against
+        // the drawn height — one row back, every frame.
+        let usable = stream::usable(&e.plan, vh);
+        stream::clamp(&mut e.state, &e.plan, usable, vw);
     }
 
     // ---- highlighting ------------------------------------------------------
@@ -469,6 +482,7 @@ mod tests {
             is_binary: false,
             old_text: Some("old\n".into()),
             new_text: Some("new\n".into()),
+            content_digest: None,
             diffed: true,
         };
         Changeset {
@@ -807,6 +821,9 @@ mod tests {
         );
     }
 
+    /// The banner survives a streaming rebuild — *while the cursor is in it*.
+    /// `clamp` moves the viewport to keep the cursor visible, so a cursor parked
+    /// on a file whose rows move takes the viewport along; see `stream::reanchored`.
     #[test]
     fn streaming_rebuild_keeps_the_banner_in_view() {
         let dir = crate_repo();

@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 
 use crate::model::{parent_dir, Changeset, LayoutMode, LineKind};
+use crate::review::Side;
 
 /// One renderable row in the review stream. The body variant present depends on
 /// the plan's `layout`: `Line` in stacked layout, `Pair` in split layout.
@@ -322,6 +323,169 @@ fn emit_split_body(rows: &mut Vec<Row>, fi: usize, lines: &[crate::model::Line])
     flush(rows, &mut rem, &mut add);
 }
 
+/// A row's content identity: the file, which side of the diff, and the line
+/// number on that side. `(file, side, line)` rather than `(file, line)` because a
+/// removed and an added line can share a file and a number.
+pub type Key = (usize, Side, u32);
+
+/// One side of a split row as a key, using the cell's own recorded side rather
+/// than its position, so the two can never disagree.
+fn cell_key(cell: Option<&SplitCell>) -> Option<Key> {
+    let c = cell?;
+    let side = if c.side_new { Side::New } else { Side::Old };
+    Some((c.file, side, c.lineno?))
+}
+
+/// Every identity a row carries, old side first.
+///
+/// A row can carry **two**: a unified context line exists on both sides, and a
+/// split pair holds one cell per side. That is what lets a layout toggle match
+/// one row against two, in both directions — it is machinery for re-anchoring,
+/// not a choice offered to the user.
+///
+/// A binary-file note (`old: None, new: None`) and every chrome row carry none,
+/// by construction rather than by special case.
+pub fn row_keys(row: &Row) -> (Option<Key>, Option<Key>) {
+    match row {
+        Row::Line { file, old, new, .. } => (
+            old.map(|n| (*file, Side::Old, n)),
+            new.map(|n| (*file, Side::New, n)),
+        ),
+        Row::Pair(l, r) => (cell_key(l.as_ref()), cell_key(r.as_ref())),
+        _ => (None, None),
+    }
+}
+
+/// The single key to re-anchor `row` by: the new side when the row carries one,
+/// the old side otherwise. Nothing is remembered between rebuilds — a stored
+/// preference is row-scoped memory that one field cannot hold, and it goes stale
+/// as soon as the cursor leaves the row that set it.
+pub fn cursor_key(plan: &Plan, row: usize) -> Option<Key> {
+    let (old, new) = row_keys(plan.rows.get(row)?);
+    new.or(old)
+}
+
+/// The row carrying `key`, if any. A key occurs at most once in a plan: hunks
+/// advance monotonically through a file, so a given `(file, side, line)` is
+/// emitted once.
+pub fn find_key(plan: &Plan, key: Key) -> Option<usize> {
+    plan.rows.iter().position(|r| {
+        let (old, new) = row_keys(r);
+        old == Some(key) || new == Some(key)
+    })
+}
+
+/// What the line cursor was pointing at, captured before a plan is rebuilt.
+///
+/// Capture **classifies**; restore is per class. A single fallback ladder cannot
+/// work, because only the *old* plan knows that a row was a folded directory's
+/// placeholder and which directory it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorAnchor {
+    /// A body row, identified by its content.
+    Line(Key),
+    /// A folded directory's placeholder (or the spacer that follows it).
+    Dir(String),
+    /// Any other row belonging to a file: its header, a hunk gap, a `Pending`
+    /// placeholder, a spacer — held as an offset from the file's own start so
+    /// another file changing size cannot move it.
+    InFile { file: usize, offset: usize },
+    /// A row above the first file: the commit-message banner region, whose rows
+    /// never move.
+    Above(usize),
+}
+
+/// The row a folded-directory placeholder belongs to, if `row` is one — or the
+/// spacer immediately after one.
+pub(crate) fn dir_at(plan: &Plan, row: usize) -> Option<&str> {
+    let named = |r: usize| match plan.rows.get(r) {
+        Some(Row::CollapsedDir { dir, .. }) => Some(dir.as_str()),
+        _ => None,
+    };
+    named(row).or_else(|| {
+        matches!(plan.rows.get(row), Some(Row::Spacer))
+            .then(|| named(row.checked_sub(1)?))
+            .flatten()
+    })
+}
+
+/// Classify the cursor's row against the plan it currently sits in.
+pub fn capture_cursor(plan: &Plan, row: usize) -> CursorAnchor {
+    // Folded directories first: `file_starts` gets an entry only for a real file,
+    // so `file_at` on a placeholder silently reports whichever file *precedes*
+    // it. Treating that as the cursor's file fabricates an anchor, and the
+    // fabrication survives into the fallbacks.
+    if let Some(dir) = dir_at(plan, row) {
+        return CursorAnchor::Dir(dir.to_string());
+    }
+    if let Some(key) = cursor_key(plan, row) {
+        return CursorAnchor::Line(key);
+    }
+    match plan.file_starts.first() {
+        Some(&first) if row >= first => {
+            let ord = file_at(&plan.file_starts, row);
+            let start = plan.file_starts.get(ord).copied().unwrap_or(0);
+            CursorAnchor::InFile {
+                file: plan.visible_files.get(ord).copied().unwrap_or(0),
+                offset: row - start,
+            }
+        }
+        _ => CursorAnchor::Above(row),
+    }
+}
+
+/// Row where a file's header sits in this plan, or `None` when it is folded away.
+fn file_start_of(plan: &Plan, file: usize) -> Option<usize> {
+    plan.visible_ordinal(file)
+        .and_then(|o| plan.file_starts.get(o).copied())
+}
+
+/// Where a file's rows went: its header, or the placeholder of the directory
+/// that swallowed it.
+fn file_or_placeholder(plan: &Plan, cs: &Changeset, file: usize) -> Option<usize> {
+    file_start_of(plan, file).or_else(|| {
+        let path = &cs.files.get(file)?.path;
+        plan.collapsed_row(parent_dir(path))
+    })
+}
+
+/// Last row belonging to the file whose header is at `start`.
+///
+/// A file's rows always end with a `Spacer` and never contain one — every
+/// `Plan::build_with_banner` branch closes a file with exactly one. So the first
+/// spacer at or after the header bounds the file, which is what stops an offset
+/// captured near the bottom of a file from spilling into the *next* file when
+/// this one shrinks (marking it reviewed collapses its body to a placeholder).
+fn file_end(plan: &Plan, start: usize) -> usize {
+    plan.rows
+        .iter()
+        .skip(start)
+        .position(|r| matches!(r, Row::Spacer))
+        .map_or_else(|| plan.rows.len().saturating_sub(1), |off| start + off)
+}
+
+/// Place the cursor in a freshly built plan.
+pub fn restore_cursor(plan: &Plan, anchor: &CursorAnchor, cs: &Changeset) -> usize {
+    let last = plan.rows.len().saturating_sub(1);
+    let row = match anchor {
+        CursorAnchor::Line(key) => find_key(plan, *key)
+            .or_else(|| file_or_placeholder(plan, cs, key.0))
+            .unwrap_or(last),
+        CursorAnchor::Dir(dir) => plan
+            .collapsed_row(dir)
+            .or_else(|| {
+                // Unfolded since capture: land on the directory's first file.
+                let i = cs.files.iter().position(|f| parent_dir(&f.path) == dir)?;
+                file_start_of(plan, i)
+            })
+            .unwrap_or(last),
+        CursorAnchor::InFile { file, offset } => file_or_placeholder(plan, cs, *file)
+            .map_or(last, |start| (start + offset).min(file_end(plan, start))),
+        CursorAnchor::Above(row) => *row,
+    };
+    row.min(last)
+}
+
 /// Index of the file whose region contains `row` (the last start <= row).
 pub fn file_at(starts: &[usize], row: usize) -> usize {
     match starts.binary_search(&row) {
@@ -378,6 +542,7 @@ mod tests {
             is_binary: false,
             old_text: None,
             new_text: None,
+            content_digest: None,
             diffed: true,
         };
         Changeset {
@@ -473,6 +638,7 @@ mod tests {
             is_binary: false,
             old_text: None,
             new_text: None,
+            content_digest: None,
             diffed: true,
         };
         let cs = Changeset {
@@ -521,6 +687,7 @@ mod tests {
             is_binary: false,
             old_text: None,
             new_text: None,
+            content_digest: None,
             diffed: true,
         };
         // Sorted by (parent_dir, name): root file first, then the two src files.
@@ -616,6 +783,418 @@ mod tests {
         // Split layout has no two-column body for a binary, so it shows nothing.
         let split = Plan::build(&cs, &[false], LayoutMode::Split, &nofold());
         assert_eq!(kinds(&split.rows), ["fh", "sp"]);
+    }
+
+    /// Every key carried by any row of a plan, in row order.
+    fn all_keys(p: &Plan) -> Vec<Key> {
+        p.rows
+            .iter()
+            .flat_map(|r| {
+                let (o, n) = row_keys(r);
+                [o, n]
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn a_unified_context_row_carries_both_sides() {
+        // The whole point: one row, two identities, so a layout toggle can match
+        // it from either side. Keying off the *displayed* number (always the new
+        // side) is what broke split→unified for context rows in an earlier draft.
+        let row = Row::Line {
+            file: 3,
+            kind: LineKind::Context,
+            old: Some(5),
+            new: Some(7),
+            text: "ctx".into(),
+            emphasis: None,
+        };
+        assert_eq!(
+            row_keys(&row),
+            (Some((3, Side::Old, 5)), Some((3, Side::New, 7)))
+        );
+    }
+
+    #[test]
+    fn one_sided_unified_rows_carry_one_key_and_binary_notes_carry_none() {
+        let mk = |old, new| Row::Line {
+            file: 0,
+            kind: LineKind::Context,
+            old,
+            new,
+            text: String::new(),
+            emphasis: None,
+        };
+        assert_eq!(
+            row_keys(&mk(Some(2), None)),
+            (Some((0, Side::Old, 2)), None)
+        );
+        assert_eq!(
+            row_keys(&mk(None, Some(2))),
+            (None, Some((0, Side::New, 2)))
+        );
+        // The binary-file note is a body row with no line number on either side,
+        // so it falls to the index path by construction, not by special case.
+        assert_eq!(row_keys(&mk(None, None)), (None, None));
+    }
+
+    #[test]
+    fn split_cells_key_by_their_own_recorded_side() {
+        let cell = |side_new, lineno| SplitCell {
+            file: 1,
+            side_new,
+            lineno,
+            kind: LineKind::Context,
+            text: String::new(),
+            emphasis: None,
+        };
+        let both = Row::Pair(Some(cell(false, Some(5))), Some(cell(true, Some(7))));
+        assert_eq!(
+            row_keys(&both),
+            (Some((1, Side::Old, 5)), Some((1, Side::New, 7)))
+        );
+        // A surplus row from an unbalanced hunk has one populated cell.
+        assert_eq!(
+            row_keys(&Row::Pair(Some(cell(false, Some(9))), None)),
+            (Some((1, Side::Old, 9)), None)
+        );
+        assert_eq!(
+            row_keys(&Row::Pair(None, Some(cell(true, Some(9))))),
+            (None, Some((1, Side::New, 9)))
+        );
+        // A cell with no line number carries nothing.
+        assert_eq!(
+            row_keys(&Row::Pair(Some(cell(false, None)), None)),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn every_chrome_row_carries_no_key() {
+        let chrome = [
+            Row::FileHeader(0),
+            Row::Collapsed(3),
+            Row::CollapsedDir {
+                dir: "src".into(),
+                n: 2,
+                reviewed: 1,
+            },
+            Row::Pending,
+            Row::Banner("msg".into()),
+            Row::HunkHeader(12),
+            Row::Spacer,
+        ];
+        for row in &chrome {
+            assert_eq!(row_keys(row), (None, None), "chrome carries no identity");
+        }
+    }
+
+    #[test]
+    fn a_context_row_is_found_from_either_of_its_keys() {
+        let cs = fixture();
+        let p = Plan::build(&cs, &[false], LayoutMode::Stack, &nofold());
+        // fixture's context line is old 1 / new 1 — the same number on both
+        // sides, so the sides must be distinguished by more than the number.
+        let by_old = find_key(&p, (0, Side::Old, 1));
+        let by_new = find_key(&p, (0, Side::New, 1));
+        assert_eq!(by_old, by_new, "both keys resolve to the one context row");
+        assert!(by_old.is_some());
+    }
+
+    #[test]
+    fn a_removed_and_an_added_line_at_the_same_number_are_distinct_rows() {
+        // fixture has removed old-2 and added new-2. Keyed on (file, line) alone
+        // these would collide; the side is what separates them.
+        let cs = fixture();
+        let p = Plan::build(&cs, &[false], LayoutMode::Stack, &nofold());
+        let rem = find_key(&p, (0, Side::Old, 2)).expect("removed line 2");
+        let add = find_key(&p, (0, Side::New, 2)).expect("added line 2");
+        assert_ne!(rem, add, "same number, different sides, different rows");
+    }
+
+    #[test]
+    fn keys_are_unique_within_a_plan_in_both_layouts() {
+        // The restore path assumes `find_key` is unambiguous.
+        // `fixture()`, not `two_dir_fixture()`: the latter is all `Added` lines,
+        // so no split row ever carries an old-side cell and collapsing both
+        // sides onto `New` would go unnoticed. `fixture()` has a context line at
+        // old 1 / new 1, which duplicates the moment the side stops mattering.
+        let cs = fixture();
+        for layout in [LayoutMode::Stack, LayoutMode::Split] {
+            let p = Plan::build(&cs, &[false], layout, &nofold());
+            let keys = all_keys(&p);
+            // A set, not a sort: `Side` is a serialized on-disk type and derives
+            // `Hash` but deliberately not `Ord`. A test is not a reason to widen
+            // the wire format's derives.
+            let uniq: std::collections::HashSet<Key> = keys.iter().copied().collect();
+            assert_eq!(keys.len(), uniq.len(), "duplicate key in {layout:?} plan");
+            assert!(!keys.is_empty(), "the fixture does carry keys");
+        }
+    }
+
+    #[test]
+    fn cursor_key_prefers_the_new_side_and_falls_back_to_old() {
+        let cs = fixture();
+        let p = Plan::build(&cs, &[false], LayoutMode::Stack, &nofold());
+        // Row 1 is the context line (both sides) -> new wins.
+        assert_eq!(cursor_key(&p, 1), Some((0, Side::New, 1)));
+        // Row 2 is a removed line (old only) -> old is all there is.
+        assert_eq!(cursor_key(&p, 2), Some((0, Side::Old, 2)));
+        // Row 0 is the file header, and past the end is nothing.
+        assert_eq!(cursor_key(&p, 0), None);
+        assert_eq!(cursor_key(&p, 999), None);
+    }
+
+    /// Rebuild `cs` under `layout`/`collapsed` and carry the cursor across.
+    fn rebuild(
+        cs: &Changeset,
+        from: &Plan,
+        row: usize,
+        viewed: &[bool],
+        layout: LayoutMode,
+        collapsed: &BTreeSet<String>,
+    ) -> (Plan, usize) {
+        let anchor = capture_cursor(from, row);
+        let plan = Plan::build(cs, viewed, layout, collapsed);
+        let row = restore_cursor(&plan, &anchor, cs);
+        (plan, row)
+    }
+
+    #[test]
+    fn a_layout_toggle_keeps_the_cursor_on_the_same_change_both_ways() {
+        let cs = fixture();
+        let stack = Plan::build(&cs, &[false], LayoutMode::Stack, &nofold());
+        // The context row: it carries both sides, which is what lets one row
+        // match against two.
+        let ctx = find_key(&stack, (0, Side::New, 1)).unwrap();
+        let (split, moved) = rebuild(&cs, &stack, ctx, &[false], LayoutMode::Split, &nofold());
+        assert!(
+            matches!(&split.rows[moved], Row::Pair(..)),
+            "landed on a split row"
+        );
+        assert_eq!(
+            row_keys(&split.rows[moved]).1,
+            Some((0, Side::New, 1)),
+            "the same context line"
+        );
+        // ...and back again.
+        let (_, back) = rebuild(&cs, &split, moved, &[false], LayoutMode::Stack, &nofold());
+        assert_eq!(back, ctx, "round-tripped to the same row");
+    }
+
+    #[test]
+    fn a_split_context_rows_old_cell_survives_the_toggle_to_unified() {
+        // The bug that killed an earlier draft: keying a row off the number it
+        // *displays* (always the new side) left the left-hand cell of every
+        // context row with nothing to match in a unified plan.
+        let cs = fixture();
+        let split = Plan::build(&cs, &[false], LayoutMode::Split, &nofold());
+        let ctx = find_key(&split, (0, Side::Old, 1)).unwrap();
+        let (stack, moved) = rebuild(&cs, &split, ctx, &[false], LayoutMode::Stack, &nofold());
+        let (old, _) = row_keys(&stack.rows[moved]);
+        assert_eq!(old, Some((0, Side::Old, 1)), "found from the old side");
+    }
+
+    #[test]
+    fn a_placeholder_stays_with_its_own_file_when_another_file_grows() {
+        // The ordinary streaming case: every file starts as three keyless rows,
+        // so a cursor parked on one while an *earlier* file's diff lands must
+        // ride with its own file. A bare index clamp leaves it inside whichever
+        // file expanded underneath it.
+        let mut cs = two_dir_fixture();
+        // Give the first file a body worth streaming in: undiffed it is three
+        // rows like every other file, diffed it is many.
+        cs.files[0].hunks[0].lines = (1..=20)
+            .map(|i| line(LineKind::Added, None, Some(i), "x"))
+            .collect();
+        for f in &mut cs.files {
+            f.diffed = false;
+        }
+        let viewed = [false, false, false];
+        let before = Plan::build(&cs, &viewed, LayoutMode::Stack, &nofold());
+        // The last file's `Pending` row.
+        let last_start = *before.file_starts.last().unwrap();
+        let pending = last_start + 1;
+        assert!(matches!(before.rows[pending], Row::Pending));
+
+        // File 0's diff lands and its body grows from one placeholder to many.
+        cs.files[0].diffed = true;
+        let (after, moved) = rebuild(&cs, &before, pending, &viewed, LayoutMode::Stack, &nofold());
+        assert!(after.rows.len() > before.rows.len(), "the plan did grow");
+        assert!(
+            matches!(after.rows[moved], Row::Pending),
+            "still on a Pending placeholder, not adrift in the grown file"
+        );
+        assert_eq!(
+            file_at(&after.file_starts, moved),
+            2,
+            "and it is still the third file's placeholder"
+        );
+    }
+
+    #[test]
+    fn folding_the_cursors_directory_lands_on_that_directorys_placeholder() {
+        let cs = two_dir_fixture();
+        let viewed = [false, false, false];
+        let before = Plan::build(&cs, &viewed, LayoutMode::Stack, &nofold());
+        // A body row inside src/b.rs.
+        let row = find_key(&before, (1, Side::New, 1)).unwrap();
+
+        let mut collapsed = BTreeSet::new();
+        collapsed.insert("src".to_string());
+        let (after, moved) = rebuild(&cs, &before, row, &viewed, LayoutMode::Stack, &collapsed);
+        assert_eq!(
+            after.collapsed_row("src"),
+            Some(moved),
+            "landed on the placeholder that replaced it, not an unrelated file"
+        );
+    }
+
+    #[test]
+    fn a_cursor_on_a_folded_placeholder_is_not_mistaken_for_the_file_before_it() {
+        // `file_starts` has no entry for a folded directory, so `file_at` on the
+        // placeholder reports whichever real file precedes it. Classifying it as
+        // that file fabricates an anchor which then survives into the fallbacks.
+        let mut cs = two_dir_fixture();
+        cs.files[0].diffed = false; // a.rs (root) will grow later
+        let viewed = [false, false, false];
+        let mut collapsed = BTreeSet::new();
+        collapsed.insert("src".to_string());
+        let before = Plan::build(&cs, &viewed, LayoutMode::Stack, &collapsed);
+        let ph = before.collapsed_row("src").unwrap();
+        assert_eq!(
+            capture_cursor(&before, ph),
+            CursorAnchor::Dir("src".into()),
+            "classified as a directory, not as the preceding file"
+        );
+        // The spacer right after it belongs to the directory too.
+        assert_eq!(
+            capture_cursor(&before, ph + 1),
+            CursorAnchor::Dir("src".into())
+        );
+
+        cs.files[0].diffed = true; // the preceding file grows
+        let (after, moved) = rebuild(&cs, &before, ph, &viewed, LayoutMode::Stack, &collapsed);
+        assert_eq!(
+            after.collapsed_row("src"),
+            Some(moved),
+            "still on src's placeholder"
+        );
+    }
+
+    #[test]
+    fn a_banner_row_keeps_its_index_and_a_body_row_is_classified_by_content() {
+        let cs = fixture();
+        let banner = ["abc123 · me".to_string(), "the message".to_string()];
+        let p = Plan::build_with_banner(&cs, &[false], LayoutMode::Stack, &nofold(), &banner);
+        assert_eq!(capture_cursor(&p, 1), CursorAnchor::Above(1));
+        // The file header carries no key but does belong to a file.
+        let header = p.file_starts[0];
+        assert_eq!(
+            capture_cursor(&p, header),
+            CursorAnchor::InFile { file: 0, offset: 0 }
+        );
+        assert!(matches!(
+            capture_cursor(&p, header + 1),
+            CursorAnchor::Line(_)
+        ));
+    }
+
+    #[test]
+    fn capture_then_restore_against_the_same_plan_holds_every_row() {
+        // The property that actually pins the restore logic down. Asserting only
+        // that the result is in range is vacuous: `restore_cursor` ends with
+        // `.min(last)`, so a body of `usize::MAX` would satisfy it.
+        //
+        // One row is deliberately not the identity: the spacer trailing a folded
+        // directory's placeholder belongs to that directory, so it normalises
+        // onto the placeholder — a blank line moving to the row that means
+        // something. Asserted explicitly rather than excused.
+        let cs = two_dir_fixture();
+        let viewed = [false, true, false];
+        let mut collapsed = BTreeSet::new();
+        collapsed.insert("src".to_string());
+        let banner = ["abc123 · me".to_string(), "the message".to_string()];
+        for fold in [&nofold(), &collapsed] {
+            for layout in [LayoutMode::Stack, LayoutMode::Split] {
+                // With a banner too, so the `Above` arm is exercised — without
+                // it no fixture ever produces that anchor, and neither it nor
+                // the trailing range clamp is reachable from this property.
+                for b in [&[][..], &banner[..]] {
+                    let p = Plan::build_with_banner(&cs, &viewed, layout, fold, b);
+                    for row in 0..p.rows.len() {
+                        let back = restore_cursor(&p, &capture_cursor(&p, row), &cs);
+                        let trailing_dir_spacer = matches!(p.rows.get(row), Some(Row::Spacer))
+                            && row > 0
+                            && matches!(p.rows.get(row - 1), Some(Row::CollapsedDir { .. }));
+                        if trailing_dir_spacer {
+                            assert_eq!(back, row - 1, "normalises onto its placeholder");
+                        } else {
+                            assert_eq!(back, row, "row {row} of a {layout:?} plan round-tripped");
+                        }
+                        // Either way it must be a fixed point: repeated rebuilds may
+                        // not walk the cursor further each time.
+                        let again = restore_cursor(&p, &capture_cursor(&p, back), &cs);
+                        assert_eq!(again, back, "restore is stable");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_keyless_row_does_not_bleed_into_the_next_file_when_its_own_file_shrinks() {
+        // Park the cursor at the bottom of a file and mark that file reviewed:
+        // its body collapses to a placeholder, so an offset held from the old
+        // header would land inside whatever file now occupies those rows.
+        let mut cs = two_dir_fixture();
+        cs.files.truncate(2);
+        for f in &mut cs.files {
+            f.hunks[0].lines = (1..=5)
+                .map(|i| line(LineKind::Added, None, Some(i), "x"))
+                .collect();
+        }
+        let before = Plan::build(&cs, &[false, false], LayoutMode::Stack, &nofold());
+        let sp = before
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Spacer))
+            .expect("the first file ends with a spacer");
+        assert_eq!(
+            capture_cursor(&before, sp),
+            CursorAnchor::InFile {
+                file: 0,
+                offset: sp
+            }
+        );
+
+        let after = Plan::build(&cs, &[true, false], LayoutMode::Stack, &nofold());
+        let moved = restore_cursor(&after, &capture_cursor(&before, sp), &cs);
+        assert!(
+            matches!(after.rows[moved], Row::Spacer),
+            "stayed on a spacer, not adrift in the next file"
+        );
+        assert_eq!(
+            file_at(&after.file_starts, moved),
+            0,
+            "and still inside its own file's region"
+        );
+    }
+
+    #[test]
+    fn restore_is_always_in_range_even_for_an_empty_plan() {
+        let cs = fixture();
+        let p = Plan::build(&cs, &[false], LayoutMode::Stack, &nofold());
+        let empty = Changeset {
+            source: "t".into(),
+            files: Vec::new(),
+        };
+        let blank = Plan::build(&empty, &[], LayoutMode::Stack, &nofold());
+        for row in 0..p.rows.len() {
+            let r = restore_cursor(&blank, &capture_cursor(&p, row), &empty);
+            assert_eq!(r, 0, "a plan with no rows leaves nowhere else to be");
+        }
     }
 
     #[test]

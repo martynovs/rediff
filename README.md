@@ -15,12 +15,17 @@ background pool so the file list appears instantly even on large changesets.
 
 - **Review workflow** — mark files reviewed (`v`), jump to the next unreviewed
   (`u`), and a live `✓ X/N` count. Finish a directory and it folds itself away.
+- **Leave review points for an agent** — a line cursor (`j`/`k`) marks a line;
+  `a` comments on it, `A` on the review as a whole. Comments land in a local
+  `rediff.jsonl`, and an agent drains them with `rediff feedback`. Neither side
+  blocks on the other.
 - **Directory grouping & collapse** — files grouped under their directory; fold
   a directory (`z`) to drop it out of scope in both the sidebar and the diff.
 - **Two layouts** — unified (stack) or side-by-side (split), toggled live (`m`).
 - **Syntax highlighting** — tree-sitter for Rust, TypeScript/TSX and
   JavaScript/JSX (with intra-line emphasis on the exact changed spans), plus a
-  syntect fallback covering Python, Go, C/C++, JSON, TOML, YAML, Markdown, shell,
+  syntect fallback covering a few hundred more, including Python, Go, C/C++, C#,
+  Java, Ruby, PHP, Swift, Kotlin, Haskell, JSON, TOML, YAML, Markdown, shell,
   HTML and CSS.
 - **Navigate history without leaving** — pick a commit (`c`), browse file
   history (`F`), step through a view stack (`<` / `>`), peek a single file (`p`).
@@ -77,6 +82,30 @@ rediff review --from <base>  # review base..target as one net diff
 Common flags: `-C/--repo <dir>` to open another repository, `--mode
 split|stack`, `--theme dark|light`, and trailing path filters (e.g.
 `rediff show HEAD~1 src/`).
+
+### Review points, for agents
+
+A human reads the diff and leaves review points; an agent picks them up and
+answers. Neither blocks on the other.
+
+```sh
+rediff                       # `j`/`k` move the cursor, `a` comments on the line
+                             # under it, `A` on the review as a whole
+rediff request [ref]         # (agent) open a review over a target
+rediff review-status         # what is pending, delivered, drained
+rediff feedback              # (agent) drain the comments, as JSON
+rediff feedback --all        # replay everything, including delivered
+```
+
+Comments are appended to **`rediff.jsonl` at the worktree root** — one JSON
+record per line, append-only, superseded by id rather than rewritten. Each
+comment carries the line's own text and a little surrounding context, so it
+re-resolves against a later diff without any stored blob; `feedback` reports
+each one as attached, shifted, detached, or unresolved.
+
+It is a local working file, not history: rediff hides it from its own diff
+views, and `.gitignore` it (this repo does). Deleting it is a complete
+uninstall — there is no other state anywhere.
 
 ### Lazygit integration
 

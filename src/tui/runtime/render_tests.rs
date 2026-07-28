@@ -28,6 +28,7 @@ fn file(path: &str, old: &str, new: &str, status: FileStatus) -> DiffFile {
         is_binary: false,
         old_text: (!old.is_empty()).then(|| old.to_string()),
         new_text: (!new.is_empty()).then(|| new.to_string()),
+        content_digest: None,
         diffed: true,
     }
 }
@@ -541,7 +542,7 @@ fn navigation_latency_is_fast() {
         if i % 2 == 0 {
             app.next_hunk();
         } else {
-            app.scroll_by(3);
+            app.move_cursor(3);
         }
         if i % 100 == 0 {
             app.top();
@@ -604,13 +605,269 @@ fn focusing_hidden_sidebar_reveals_it_temporarily() {
     assert!(!app.sidebar_shown(), "hidden again when focus leaves it");
 }
 
+/// Which drawn lines of the stream carry the cursor marker, by y coordinate.
+///
+/// The marker is a glyph in the stream area's first column, so the existing
+/// text-reading harness can see it — asserting a *background* would have needed
+/// cell-style inspection that exists nowhere in this file.
+fn marked_lines(term: &Terminal<TestBackend>, stream_x: u16) -> Vec<u16> {
+    let buf = term.backend().buffer().clone();
+    (0..buf.area.height)
+        .filter(|&y| buf[(stream_x, y)].symbol() == "\u{258e}")
+        .collect()
+}
+
+#[test]
+fn exactly_one_row_is_marked_as_current_in_both_layouts() {
+    let cs = big_sample();
+    for layout in [LayoutMode::Stack, LayoutMode::Split] {
+        let mut app = App::new(&cs);
+        app.layout = layout;
+        let mut term = Terminal::new(TestBackend::new(90, 14)).unwrap();
+        term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+        let stream_x = app.sidebar_area.width;
+        let marks = marked_lines(&term, stream_x);
+        assert_eq!(marks.len(), 1, "exactly one marked row in {layout:?}");
+        assert_eq!(
+            marks[0] as usize,
+            app.state().cursor_row,
+            "the marked line is the cursor's row (viewport at the top)"
+        );
+
+        // It follows the cursor rather than staying put.
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        term.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let moved = marked_lines(&term, stream_x);
+        assert_eq!(moved, vec![marks[0] + 1], "the mark moved with the cursor");
+    }
+}
+
+#[test]
+fn the_marker_accounts_for_the_pinned_file_header() {
+    // The off-by-one that `lines.len()` would produce: the sticky header takes
+    // drawn line 0 without being a plan row, so the marker sits one lower than
+    // the cursor's offset from `scroll`.
+    let cs = big_sample();
+    let mut app = App::new(&cs);
+    let mut term = Terminal::new(TestBackend::new(90, 14)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    // Scroll into the first file so its header pins, dragging the cursor along.
+    app.scroll_view(4);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    assert!(app.state().scroll > 0, "the header is pinned");
+
+    let stream_x = app.sidebar_area.width;
+    let marks = marked_lines(&term, stream_x);
+    assert_eq!(marks.len(), 1);
+    let rel = app.state().cursor_row - app.state().scroll;
+    assert_eq!(
+        marks[0] as usize,
+        rel + 1,
+        "shifted down one by the pinned header"
+    );
+}
+
+#[test]
+fn the_peek_draws_no_cursor_marker() {
+    // The peek shares `ViewState` but never reads `cursor_row`. This is the
+    // tripwire for implementing the marker inside the row renderers instead of
+    // the `draw_*` functions, which would light up row 0 of every peek.
+    let cs = big_sample();
+    let mut app = App::new(&cs);
+    let mut term = Terminal::new(TestBackend::new(90, 14)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    app.open_peek_preview();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    assert!(app.peek_open(), "the peek is up");
+
+    let buf = term.backend().buffer().clone();
+    let any = (0..buf.area.height)
+        .any(|y| (0..buf.area.width).any(|x| buf[(x, y)].symbol() == "\u{258e}"));
+    assert!(!any, "no cursor marker anywhere while the peek is open");
+}
+
+#[test]
+fn the_status_percentage_tracks_the_cursor_not_the_viewport() {
+    // At the bottom of a file the viewport top is a page behind, so reporting
+    // `scroll` reads well under 100% with the cursor on the last row. The
+    // percentage answers "how far have I read", which is the cursor.
+    let cs = big_sample();
+    let mut app = App::new(&cs);
+    let mut term = Terminal::new(TestBackend::new(90, 14)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    handle_key(&mut app, KeyCode::Char('G'), KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    assert!(
+        app.state().cursor_row > app.state().scroll,
+        "the viewport top lags the cursor, so the two disagree"
+    );
+
+    let buf = term.backend().buffer().clone();
+    let mut status = String::new();
+    for x in 0..90u16 {
+        status.push_str(buf[(x, 13)].symbol());
+    }
+    assert!(
+        status.contains("100%"),
+        "G reads 100%, not the viewport's lower figure: {status:?}"
+    );
+}
+
+#[test]
+fn the_comment_overlay_draws_its_title_and_typed_text() {
+    let cs = big_sample();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::with_launch(
+        &cs,
+        LayoutMode::Stack,
+        crate::tui::theme::ThemeName::Dark,
+        Some(dir.path().to_path_buf()),
+        crate::tui::ViewKind::Local,
+        true,
+        None,
+        Some(crate::git::LoadRequest::Staged),
+    );
+    app.attach_review_log(Some(crate::review::Log::at_worktree(dir.path())), false);
+    let mut term = Terminal::new(TestBackend::new(90, 16)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+    for c in "needs a test".chars() {
+        handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    let buf = term.backend().buffer().clone();
+    let mut out = String::new();
+    for y in 0..16u16 {
+        for x in 0..90u16 {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    assert!(
+        out.contains("needs a test"),
+        "the typed text is drawn: {out}"
+    );
+    assert!(
+        out.contains("comment on this review"),
+        "and the status line names what is being composed"
+    );
+}
+
+#[test]
+fn the_comment_overlay_shows_a_refusal_and_the_tail_of_a_long_line() {
+    // Both paths a user actually hits and neither of which the status bar can
+    // show: `draw_status` hides the flash under an overlay, and a comment
+    // longer than the box would otherwise scroll off with the cursor.
+    let cs = big_sample();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::with_launch(
+        &cs,
+        LayoutMode::Stack,
+        crate::tui::theme::ThemeName::Dark,
+        Some(dir.path().to_path_buf()),
+        crate::tui::ViewKind::Local,
+        true,
+        None,
+        Some(crate::git::LoadRequest::Staged),
+    );
+    // Filtered, so confirming is refused and the reason must be visible.
+    app.attach_review_log(Some(crate::review::Log::at_worktree(dir.path())), true);
+    let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+    let long: String = std::iter::repeat_n('x', 200).collect();
+    for c in long.chars().chain("TAIL".chars()) {
+        handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    let buf = term.backend().buffer().clone();
+    let mut out = String::new();
+    for y in 0..16u16 {
+        for x in 0..80u16 {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    assert!(
+        out.contains("TAIL"),
+        "the caret end of a long comment stays visible: {out}"
+    );
+    assert!(
+        out.contains("a review covers a whole target; this view is filtered"),
+        "and the whole refusal fits inside the box: {out}"
+    );
+}
+
+#[test]
+fn wrap_mode_draws_no_cursor_marker() {
+    // One plan row spends several drawn lines under `wrap`, so `cursor_row -
+    // scroll` stops being the drawn line. A marker placed by that arithmetic
+    // points at an unrelated continuation line — worse than showing none.
+    let cs = big_sample();
+    let mut app = App::new(&cs);
+    let mut term = Terminal::new(TestBackend::new(60, 14)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    let stream_x = app.sidebar_area.width;
+    assert_eq!(
+        marked_lines(&term, stream_x).len(),
+        1,
+        "marked while unwrapped"
+    );
+
+    handle_key(&mut app, KeyCode::Char('w'), KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    assert!(app.state().wrap, "wrap is on");
+    assert!(
+        marked_lines(&term, stream_x).is_empty(),
+        "no marker rather than a misplaced one"
+    );
+}
+
+#[test]
+fn g_reaches_the_last_row_and_survives_a_draw() {
+    // Deliberately asserted *after* a render. `App::clamp` runs from `reconcile`
+    // on every draw; if it bounded `scroll` against the full viewport while
+    // `bottom` used the drawn height, it would snap back one row per frame and
+    // drag the cursor off the last row with it. A unit test of `bottom()` alone
+    // passes with that bug present.
+    let cs = big_sample();
+    let mut app = App::new(&cs);
+    let mut term = Terminal::new(TestBackend::new(80, 14)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    handle_key(&mut app, KeyCode::Char('G'), KeyModifiers::NONE);
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    let last = app.plan().rows.len() - 1;
+    assert_eq!(
+        app.state().cursor_row,
+        last,
+        "G lands on the last row and stays"
+    );
+
+    let usable = crate::tui::stream::usable(app.plan(), app.viewport_h);
+    let scroll = app.state().scroll;
+    assert!(
+        (scroll..scroll + usable).contains(&last),
+        "the last row is drawn: window {scroll}..{} holds {last}",
+        scroll + usable
+    );
+}
+
 #[test]
 fn sticky_header_pins_current_file() {
     let cs = big_sample();
     let mut app = App::new(&cs);
     let mut term = Terminal::new(TestBackend::new(70, 12)).unwrap();
     // Scroll a few rows into the first file, past its header.
-    app.scroll_by(4);
+    app.scroll_view(4);
     term.draw(|f| ui::draw(f, &mut app)).unwrap();
     assert!(app.state().scroll > 0);
 
@@ -627,7 +884,11 @@ fn sticky_header_pins_current_file() {
 }
 
 #[test]
-fn scrolling_updates_selected_file() {
+fn moving_the_cursor_into_a_file_selects_it() {
+    // The `j`/`k` path specifically. This used to be covered by a test that
+    // called `App::scroll_by` — which *was* the `j` path — but that method split
+    // in two, and the test followed the scroll-gesture half, leaving cursor
+    // motion's selection anchoring uncovered.
     let cs = big_sample();
     let mut app = App::new(&cs);
     app.viewport_h = 10;
@@ -636,19 +897,83 @@ fn scrolling_updates_selected_file() {
         reason = "a file-start row offset in a tiny test changeset is far below isize::MAX"
     )]
     let second = app.plan().file_starts[1] as isize;
-    app.scroll_by(second);
-    assert_eq!(app.current_file(), 1);
+    app.move_cursor(second);
+
+    assert_eq!(app.state().selected, 1, "the cursor's file is selected");
+    // Asymmetric on purpose: the viewport lags the cursor by a page, so this
+    // distinguishes a cursor-derived selection from a viewport-derived one.
+    // Seeded with scroll == cursor, both models agree and the test proves nothing.
     assert_eq!(
-        app.state().selected,
-        1,
-        "scrolling the diff moves the selected file"
+        app.current_file(),
+        0,
+        "while the viewport top is still in the first file"
     );
+
     app.top();
     assert_eq!(
         app.state().selected,
         0,
-        "scrolling back to the top reselects the first file"
+        "returning to the top reselects the first file"
     );
+}
+
+#[test]
+fn a_scroll_gesture_also_updates_the_selected_file() {
+    let cs = big_sample();
+    let mut app = App::new(&cs);
+    app.viewport_h = 10;
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "a file-start row offset in a tiny test changeset is far below isize::MAX"
+    )]
+    let second = app.plan().file_starts[1] as isize;
+    app.scroll_view(second);
+    assert_eq!(app.state().selected, 1, "J/K and the wheel anchor too");
+}
+
+#[test]
+fn the_cursor_survives_a_layout_toggle_in_both_directions() {
+    // The whole "surviving a rebuild" story, at app level. The unit tests cover
+    // `capture_cursor`/`restore_cursor`; nothing exercised them through a real
+    // rebuild with the cursor anywhere but row 0 — so dropping the restore
+    // assignment in `Session::build_plan` went unnoticed.
+    //
+    // Each direction is checked from a fresh start rather than as a round trip:
+    // a unified removed line and the split pair holding it are the *same
+    // change*, and coming back the pair's preferred identity is the added side,
+    // so a round trip may legitimately land on the change's other row.
+    for start_split in [false, true] {
+        let cs = big_sample();
+        let mut app = if start_split {
+            App::with_mode(&cs, LayoutMode::Split)
+        } else {
+            App::new(&cs)
+        };
+        app.viewport_h = 12;
+        let target = app.plan().file_starts[2] + 4;
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "a row offset in a tiny test changeset is far below isize::MAX"
+        )]
+        let delta = target as isize;
+        app.move_cursor(delta);
+        let key = crate::tui::rows::cursor_key(app.plan(), app.state().cursor_row)
+            .expect("parked on a body row with an identity");
+
+        app.cycle_mode();
+        app.set_layout(80);
+
+        let row = app
+            .plan()
+            .rows
+            .get(app.state().cursor_row)
+            .expect("cursor_row is clamped into the plan on every rebuild");
+        let (old, new) = crate::tui::rows::row_keys(row);
+        assert!(
+            old == Some(key) || new == Some(key),
+            "the cursor's row still carries {key:?} (started split: {start_split})"
+        );
+    }
 }
 
 #[test]
@@ -780,19 +1105,26 @@ fn scroll_step_is_one_shift_is_several() {
     let mut term = Terminal::new(TestBackend::new(90, 12)).unwrap();
     term.draw(|f| ui::draw(f, &mut app)).unwrap();
 
-    // Vertical: base one line, Shift several.
+    // Vertical: `j` steps the cursor one row without scrolling (it is still on
+    // screen); the Shift gestures scroll the viewport and carry the cursor.
     handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
-    assert_eq!(app.state().scroll, 1, "j scrolls one line");
-    handle_key(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT);
+    assert_eq!(app.state().cursor_row, 1, "j steps the cursor one row");
     assert_eq!(
         app.state().scroll,
+        0,
+        "and does not scroll — the row is visible"
+    );
+    handle_key(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT);
+    assert_eq!(app.state().scroll, BIG_STEP as usize, "J scrolls several");
+    assert_eq!(
+        app.state().cursor_row,
         1 + BIG_STEP as usize,
-        "J scrolls several"
+        "and the cursor keeps its row on screen"
     );
     handle_key(&mut app, KeyCode::Down, KeyModifiers::SHIFT);
     assert_eq!(
         app.state().scroll,
-        1 + 2 * BIG_STEP as usize,
+        2 * BIG_STEP as usize,
         "Shift+Down scrolls several"
     );
 
@@ -837,13 +1169,14 @@ fn stream_keys_cover_scroll_family() {
     handle_key(&mut app, KeyCode::Up, KeyModifiers::SHIFT);
     assert_eq!(app.state().scroll, 0, "Shift+Up fast-scrolls back");
     handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
-    let one = app.state().scroll;
-    assert!(one > 0, "Down scrolls one line");
+    let one = app.state().cursor_row;
+    assert!(one > 0, "Down steps the cursor one row");
     handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
-    assert!(app.state().scroll > one, "j scrolls one more");
+    assert!(app.state().cursor_row > one, "j steps one more");
     handle_key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
     handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
-    assert_eq!(app.state().scroll, 0, "k/Up step back to the top");
+    assert_eq!(app.state().cursor_row, 0, "k/Up step back to the first row");
+    assert_eq!(app.state().scroll, 0, "and the viewport never left the top");
 
     // Horizontal pan: every arm runs (clamping is fine — coverage, not motion).
     for (code, mods) in [

@@ -528,6 +528,66 @@ pub(super) fn draw_commit_message(frame: &mut Frame, body: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), content);
 }
 
+/// The comment input: a titled one-line box over whatever summoned it.
+pub(super) fn draw_comment(frame: &mut Frame, body: Rect, app: &App) {
+    let Some(input) = app.comment_input_state() else {
+        return;
+    };
+    let t = &app.theme;
+    let accent = t.accent;
+    let w = (body.width.saturating_mul(8) / 10)
+        .max(20)
+        .min(body.width.saturating_sub(2));
+    let inner = popup_frame(
+        frame,
+        body,
+        w,
+        4,
+        3,
+        accent,
+        t.bg,
+        Padding::new(1, 1, 0, 0),
+        Line::from(Span::styled(
+            format!(" {} ", input.title()),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+    );
+    // Keep the caret in view: show the tail of a buffer wider than the box, so a
+    // long comment is not typed blind with the cursor off the end.
+    let room = (inner.width as usize).saturating_sub(1);
+    let shown: String = {
+        let chars: Vec<char> = input.buffer.chars().collect();
+        chars
+            .get(chars.len().saturating_sub(room)..)
+            .unwrap_or_default()
+            .iter()
+            .collect()
+    };
+    // A block cursor after the text, so an empty input still shows where typing
+    // will land.
+    let line = Line::from(vec![
+        Span::styled(shown, Style::default().fg(t.context)),
+        Span::styled("\u{2588}", Style::default().fg(accent)),
+    ]);
+    frame.render_widget(Paragraph::new(line), inner);
+    // A refusal renders in the box's own footer; the status bar hides the flash
+    // while an overlay is up.
+    if let Some(msg) = input.refusal.as_deref() {
+        let row = Rect {
+            y: inner.y.saturating_add(1),
+            height: 1,
+            ..inner
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                msg.to_string(),
+                Style::default().fg(t.warn),
+            ))),
+            row,
+        );
+    }
+}
+
 /// The live-preview theme picker: a centered grid of theme names. The cursor
 /// cell is highlighted; the whole UI behind the popup already shows the
 /// previewed theme. The grid windows vertically so the selection stays visible.
@@ -652,6 +712,7 @@ mod tests {
             is_binary: false,
             old_text: Some("a\n".into()),
             new_text: Some("a\nb\n".into()),
+            content_digest: None,
             diffed: true,
         }
     }
@@ -1041,6 +1102,7 @@ mod tests {
             is_binary: false,
             old_text: Some("same\n".into()),
             new_text: Some("same\n".into()),
+            content_digest: None,
             diffed: true,
         }
     }
@@ -1058,6 +1120,7 @@ mod tests {
             is_binary: false,
             old_text: Some(String::new()),
             new_text: Some(String::new()),
+            content_digest: None,
             diffed: true,
         }
     }

@@ -20,7 +20,7 @@ use crate::git::{FileStub, LoadRequest};
 use crate::model::{Changeset, LayoutMode};
 use crate::tui::app::LOAD_PROGRESS_DELAY;
 use crate::tui::loader::Loader;
-use crate::tui::rows::Plan;
+use crate::tui::rows::{self, Plan};
 use crate::tui::stream;
 use crate::tui::view::{ViewEntry, ViewKind, ViewState};
 
@@ -196,9 +196,20 @@ impl Session {
         // Folds only apply in the grouped view; flat shows every file in both panes.
         let empty = BTreeSet::new();
         let collapsed = if grouped { &e.state.collapsed } else { &empty };
+        // Classify the line cursor before the plan under it is replaced. This is
+        // the only rebuild funnel — every `build_plan()` call site reaches it —
+        // so restoring here needs no caller to remember anything. View
+        // *construction* builds a plan outside this function, but on a fresh
+        // `ViewState`, where there is nothing to restore.
+        let anchor = rows::capture_cursor(&e.plan, e.state.cursor_row);
         let plan =
             Plan::build_with_banner(e.cs.as_ref(), &e.state.viewed, layout, collapsed, &e.banner);
-        self.cur_mut().plan = plan;
+        let cur = self.cur_mut();
+        cur.plan = plan;
+        // Identity only. Making the cursor *visible* again is `stream::clamp`'s
+        // job: it has the viewport height, and this function does not.
+        let row = rows::restore_cursor(&cur.plan, &anchor, cur.cs.as_ref());
+        cur.state.cursor_row = row;
     }
 
     /// Rebuild the row plan from the current viewed/collapsed state, keeping the
@@ -227,7 +238,12 @@ impl Session {
             self.state_mut().scroll = stream::reanchored(scroll, old, new);
         }
         let e = &mut self.views[self.cursor];
-        stream::clamp(&mut e.state, &e.plan, viewport_h, viewport_w);
+        // Same `usable` bound as `App::clamp`. This path never routes through
+        // that one — `streaming_rebuild_keeps_the_banner_in_view` exercises it
+        // directly — so a raw `viewport_h` here is the same off-by-one, one
+        // layer down.
+        let usable = stream::usable(&e.plan, viewport_h);
+        stream::clamp(&mut e.state, &e.plan, usable, viewport_w);
     }
 
     // ---- stack mutation -----------------------------------------------------

@@ -56,6 +56,7 @@ pub fn run(
     };
     // No explicit mode → stack by default; `m` toggles to split.
     let mode = mode.unwrap_or(LayoutMode::Stack);
+    let app_repo_dir = repo_dir.clone();
     let mut app = App::with_launch(
         &cs,
         mode,
@@ -66,6 +67,15 @@ pub fn run(
         base,
         Some(req.clone()),
     );
+    // The log belongs to the worktree root, not the invocation directory:
+    // `rediff` run inside `src/` would otherwise write `src/rediff.jsonl`, which
+    // the loader does not filter out. A repository without a worktree simply has
+    // no log, and commenting is inert.
+    let log = gix::discover(&app_repo_dir)
+        .ok()
+        .and_then(|repo| crate::review::log_path(&repo))
+        .map(crate::review::Log::new);
+    app.attach_review_log(log, !filters.is_empty());
     app.begin_load(stubs, false);
 
     let mut terminal = setup_terminal()?;
@@ -207,6 +217,9 @@ fn dispatch_event(app: &mut App, ev: &Event) -> bool {
                     }
                     true
                 }
+                // Composing a comment absorbs the mouse entirely: there is
+                // nothing to scroll and a click must not reach the diff behind.
+                InputContext::Comment => true,
                 // While the peek is open, the wheel scrolls it; clicks are ignored.
                 InputContext::Peek => {
                     if let Some(d) = wheel {
@@ -247,7 +260,7 @@ fn apply_mouse(app: &mut App, m: MouseEvent) {
             } else if over_sidebar {
                 app.sidebar_scroll(dir);
             } else {
-                app.scroll_by(dir * 3);
+                app.scroll_view(dir * 3);
             }
         }
         MouseEventKind::Down(_) => {
@@ -283,6 +296,7 @@ mod tests {
             is_binary: false,
             old_text: (!old.is_empty()).then(|| old.to_string()),
             new_text: (!new.is_empty()).then(|| new.to_string()),
+            content_digest: None,
             diffed: true,
         }
     }
@@ -338,7 +352,7 @@ mod tests {
             KeyModifiers::NONE,
         ));
         assert!(dispatch_event(&mut app, &press), "a key press redraws");
-        assert_eq!(app.state().scroll, 1, "j scrolled the stream");
+        assert_eq!(app.state().cursor_row, 1, "j moved the line cursor");
 
         // A key Release is ignored: no redraw, no state change.
         let mut rel =
@@ -348,7 +362,7 @@ mod tests {
             !dispatch_event(&mut app, &Event::Key(rel)),
             "a key release is ignored"
         );
-        assert_eq!(app.state().scroll, 1, "release did not scroll");
+        assert_eq!(app.state().cursor_row, 1, "release did not move the cursor");
 
         // A resize always redraws.
         assert!(
@@ -640,5 +654,70 @@ mod tests {
         ));
         assert!(app.loading(), "a present loader means loading");
         assert_eq!(poll_timeout(&app), Duration::from_millis(16));
+    }
+}
+#[cfg(test)]
+mod comment_mouse_tests {
+    use super::*;
+    use crate::tui::app::App;
+    use ratatui::crossterm::event::{KeyCode, MouseButton, MouseEventKind};
+
+    /// The comment input must absorb the mouse entirely: a click behind a modal
+    /// must not select or refocus, and the wheel must not scroll anything.
+    #[test]
+    fn the_comment_overlay_absorbs_the_mouse() {
+        // Big enough that the viewport can actually scroll — with a plan
+        // shorter than the viewport, `max_scroll` is 0 and a leaked wheel event
+        // moves nothing, so the test would pass either way.
+        let files: Vec<_> = (0..12)
+            .map(|i| {
+                let body = "a line of content\n".repeat(12);
+                crate::testutil::diff_file(&format!("f{i}.rs"), Some(&body))
+            })
+            .collect();
+        let cs = crate::testutil::changeset(files);
+        let mut app = App::new(&cs);
+        app.viewport_h = 12;
+        app.sidebar_area = ratatui::layout::Rect::new(0, 0, 30, 20);
+        super::super::keys::handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+
+        // Everything a leak could plausibly move.
+        let snap = |a: &App| {
+            (
+                a.state().scroll,
+                a.state().cursor_row,
+                a.state().selected,
+                a.sidebar_top,
+                a.focus(),
+            )
+        };
+        let before = snap(&app);
+
+        app.mode.push_overlay(crate::tui::app::Overlay::Comment(
+            crate::tui::app::CommentInput::new(None),
+        ));
+
+        // Wheel over the stream (past the sidebar), wheel over the sidebar, and
+        // a click in each — the three routes `apply_mouse` would take.
+        for (kind, col) in [
+            (MouseEventKind::ScrollDown, 40),
+            (MouseEventKind::ScrollUp, 40),
+            (MouseEventKind::ScrollDown, 2),
+            (MouseEventKind::Down(MouseButton::Left), 2),
+            (MouseEventKind::Down(MouseButton::Left), 40),
+        ] {
+            let ev = Event::Mouse(MouseEvent {
+                kind,
+                column: col,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert!(dispatch_event(&mut app, &ev), "the event is consumed");
+            assert_eq!(
+                snap(&app),
+                before,
+                "nothing behind the modal moved ({kind:?} at {col})"
+            );
+        }
     }
 }

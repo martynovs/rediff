@@ -143,3 +143,184 @@ fn external_renders_two_files() {
     assert!(stdout.contains("src/lib.rs"), "external names the file");
     assert!(stdout.contains("\x1b[38;2;"), "external emits ANSI");
 }
+
+// ---- review loop ----------------------------------------------------------
+
+/// Run `rediff <args>` in `repo`, returning (stdout, stderr, success).
+fn rediff(repo: &std::path::Path, args: &[&str]) -> (String, String, bool) {
+    let out = Command::new(env!("CARGO_BIN_EXE_rediff"))
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("run rediff");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
+}
+
+/// Append a record to the review log, standing in for the capture surface that
+/// has not been built yet. Legitimate precisely because the log's format *is* the
+/// contract between surfaces.
+fn append_thread(repo: &std::path::Path, id: &str, body: &str) {
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(repo.join("rediff.jsonl"))
+        .expect("open log");
+    writeln!(
+        f,
+        r#"{{"t":"thread","id":"{id}","body":"{body}","at":"2026-07-27T00:00:00+00:00"}}"#
+    )
+    .expect("append");
+}
+
+#[test]
+fn review_loop_request_then_feedback() {
+    let repo = common::GitFixture::new();
+    repo.write("a.rs", "fn main() {}\n");
+    repo.commit_all("base");
+    repo.write("a.rs", "fn main() { let x = 1; }\n");
+
+    // No review yet.
+    let (out, _, ok) = rediff(repo.path(), &["review-status"]);
+    assert!(ok && out.contains("no review open"), "{out}");
+
+    // Request opens one, and hints about .gitignore on stderr only.
+    let (out, err, ok) = rediff(repo.path(), &["request", "--label", "agent-a"]);
+    assert!(ok, "request failed: {err}");
+    assert!(
+        out.contains("opened review") && out.contains("round 1"),
+        "{out}"
+    );
+    assert!(err.contains(".gitignore"), "hint goes to stderr: {err}");
+    assert!(repo.path().join("rediff.jsonl").exists());
+
+    // Status reflects it.
+    let (out, _, ok) = rediff(repo.path(), &["review-status", "--json"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("status is JSON");
+    assert_eq!(v["review"]["target"], "worktree");
+    assert_eq!(v["review"]["label"], "agent-a");
+    assert_eq!(v["review"]["round"], 1);
+
+    // A human comments (via the log, since no capture surface exists yet).
+    append_thread(repo.path(), "t1", "prefer a named constant");
+
+    // The agent drains it.
+    let (out, _, ok) = rediff(repo.path(), &["feedback"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("feedback is JSON");
+    assert_eq!(v["threads"][0]["id"], "t1");
+    assert_eq!(v["threads"][0]["body"], "prefer a named constant");
+    assert_eq!(v["threads"][0]["delivered"], false);
+
+    // Draining again delivers nothing.
+    let (out, _, ok) = rediff(repo.path(), &["feedback"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["threads"].as_array().unwrap().len(), 0, "drain-once");
+
+    // But a replay still shows it, flagged.
+    let (out, _, ok) = rediff(repo.path(), &["feedback", "--all"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["threads"][0]["id"], "t1");
+    assert_eq!(v["threads"][0]["delivered"], true);
+
+    // A second request attaches rather than starting over, and re-emits no hint.
+    let (out, err, ok) = rediff(repo.path(), &["request"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("attached to review"), "{out}");
+    assert!(!err.contains(".gitignore"), "hint is not repeated: {err}");
+}
+
+#[test]
+fn request_refuses_path_filters_and_reports_nothing_to_review() {
+    let repo = common::GitFixture::new();
+    repo.write("a.rs", "fn main() {}\n");
+    repo.commit_all("base");
+
+    // A clean tree has nothing to review, and opens no log.
+    let (out, _, ok) = rediff(repo.path(), &["request"]);
+    assert!(ok, "an empty changeset is not an error");
+    assert!(out.contains("nothing to review"), "{out}");
+    assert!(!repo.path().join("rediff.jsonl").exists());
+
+    repo.write("a.rs", "fn main() { let x = 1; }\n");
+    let (_, err, ok) = rediff(repo.path(), &["request", "src/"]);
+    assert!(!ok, "path filters are refused");
+    assert!(err.contains("no path filters"), "{err}");
+}
+
+#[test]
+fn the_review_log_never_appears_in_a_diff() {
+    let repo = common::GitFixture::new();
+    repo.write("a.rs", "fn main() {}\n");
+    repo.commit_all("base");
+    repo.write("a.rs", "fn main() { let x = 1; }\n");
+    rediff(repo.path(), &["request"]);
+    assert!(repo.path().join("rediff.jsonl").exists());
+
+    // `diff` piped is the non-TUI dump path.
+    let (out, _, ok) = rediff(repo.path(), &["diff"]);
+    assert!(ok);
+    assert!(out.contains("a.rs"), "the real change is shown");
+    assert!(
+        !out.contains("rediff.jsonl"),
+        "the reviewer never reviews its own log:\n{out}"
+    );
+}
+
+#[test]
+fn request_accepts_a_single_commit_as_its_target() {
+    // `show:<rev>` was a target the codec supported but no invocation could
+    // produce: `request HEAD` was classified as a path filter and rejected.
+    let repo = common::GitFixture::new();
+    repo.write("a.rs", "fn main() {}\n");
+    repo.commit_all("base");
+    repo.write("a.rs", "fn main() { let x = 1; }\n");
+    repo.commit_all("second");
+
+    let (out, err, ok) = rediff(repo.path(), &["request", "HEAD"]);
+    assert!(ok, "a bare rev must be a target, not a filter: {err}");
+    assert!(out.contains("opened review"), "{out}");
+
+    let (out, _, ok) = rediff(repo.path(), &["review-status", "--json"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["review"]["target"], "show:HEAD");
+}
+
+#[test]
+fn a_closed_pipe_does_not_consume_the_feedback() {
+    // Marking delivered before the write lands would destroy the comments.
+    let repo = common::GitFixture::new();
+    repo.write("a.rs", "fn main() {}\n");
+    repo.commit_all("base");
+    repo.write("a.rs", "fn main() { let x = 1; }\n");
+    rediff(repo.path(), &["request"]);
+    append_thread(repo.path(), "t1", "still here");
+
+    // `head -0` closes the pipe immediately.
+    let ok = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "{} feedback | head -0",
+            env!("CARGO_BIN_EXE_rediff")
+        ))
+        .current_dir(repo.path())
+        .status()
+        .expect("run pipeline");
+    let _ = ok;
+
+    // The comment must survive for the next real drain.
+    let (out, _, ok) = rediff(repo.path(), &["feedback"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["threads"][0]["id"], "t1",
+        "a closed pipe must not consume the feedback:\n{out}"
+    );
+}

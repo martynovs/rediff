@@ -175,6 +175,59 @@ pub(super) fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Glyph marking the line cursor's row, drawn in the one column both layouts
+/// leave blank.
+const CURSOR_MARK: &str = "\u{258e}";
+
+/// Draw the line-cursor marker in column `area.x`.
+///
+/// Both `draw_stack` and `draw_split` inset their content to `area.x + 1`, so
+/// that column is free — which is why the cursor is a marker rather than a row
+/// background. A background cannot work here: the highlighter's spans patch over
+/// a line-level style, split builds its background per span with no line-level
+/// mechanism at all, and an empty split half and the column divider have no
+/// background path to set.
+///
+/// `sticky` shifts the marker down one, because the pinned file header occupies
+/// drawn line 0 without being a plan row.
+/// Drawn line the cursor marker belongs on, or `None` when it is off screen.
+///
+/// Split out from the painting so the arithmetic — including the sticky-header
+/// shift, which is the off-by-one `lines.len()` would produce — is reachable
+/// without a `Frame`.
+fn marker_line(cursor_row: usize, scroll: usize, sticky: bool, height: usize) -> Option<usize> {
+    let rel = cursor_row.checked_sub(scroll)?;
+    let line = rel + usize::from(sticky);
+    (line < height).then_some(line)
+}
+
+fn draw_cursor_marker(frame: &mut Frame, area: Rect, app: &App, sticky: bool) {
+    let st = app.state();
+    // With `wrap` on, one plan row spends several drawn lines, so `cursor_row -
+    // scroll` is no longer the drawn line. Painting the marker anyway points at
+    // an unrelated continuation line, which is worse than not showing it —
+    // `wrap` is out of scope for the cursor's visibility guarantee.
+    if st.wrap {
+        return;
+    }
+    if let Some(line) = marker_line(st.cursor_row, st.scroll, sticky, area.height as usize) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "marker_line guarantees line < area.height, itself a u16"
+        )]
+        let rect = Rect {
+            x: area.x,
+            y: area.y + line as u16,
+            width: 1,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(CURSOR_MARK).style(Style::default().fg(app.theme.accent)),
+            rect,
+        );
+    }
+}
+
 pub(super) fn draw_stack(frame: &mut Frame, area: Rect, app: &App) {
     let inner = Rect {
         x: area.x + 1,
@@ -225,6 +278,7 @@ pub(super) fn draw_stack(frame: &mut Frame, area: Rect, app: &App) {
         para
     };
     frame.render_widget(para, inner);
+    draw_cursor_marker(frame, area, app, sticky);
 }
 
 pub(super) fn draw_split(frame: &mut Frame, area: Rect, app: &App) {
@@ -250,7 +304,8 @@ pub(super) fn draw_split(frame: &mut Frame, area: Rect, app: &App) {
         .plan()
         .visible_ordinal(cf)
         .and_then(|o| app.plan().file_starts.get(o).copied());
-    let content_height = if cf_row.is_some_and(|r| app.state().scroll > r) {
+    let sticky = cf_row.is_some_and(|r| app.state().scroll > r);
+    let content_height = if sticky {
         lines.push(file_header_line(app, cf));
         height.saturating_sub(1)
     } else {
@@ -267,6 +322,7 @@ pub(super) fn draw_split(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(split_row_line(app, row, col_w, app.state().h_scroll, None));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+    draw_cursor_marker(frame, area, app, sticky);
 }
 
 /// Render one side-by-side row. `hl_override` keys highlighting to the peek slot.
@@ -648,6 +704,23 @@ pub(super) fn render_row<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_line_shifts_for_the_pinned_header_and_reports_off_screen() {
+        // Cursor three rows below the viewport top, no pinned header.
+        assert_eq!(marker_line(13, 10, false, 20), Some(3));
+        // With the header pinned it occupies drawn line 0, so everything shifts.
+        assert_eq!(marker_line(13, 10, true, 20), Some(4));
+        // Off the bottom of the drawn area.
+        assert_eq!(marker_line(40, 10, false, 20), None);
+        // Exactly one past the last drawn line.
+        assert_eq!(marker_line(30, 10, false, 20), None);
+        assert_eq!(marker_line(29, 10, false, 20), Some(19));
+        // Above the viewport top — clamp keeps this from happening, but the
+        // painter must not underflow if it ever does.
+        assert_eq!(marker_line(2, 10, false, 20), None);
+    }
+
     use crate::model::{Changeset, DiffFile, LayoutMode, Stats};
     use crate::tui::theme::ThemeName;
     use crate::tui::view::ViewKind;
@@ -672,6 +745,7 @@ mod tests {
             is_binary: false,
             old_text: Some("a\nb\n".into()),
             new_text: Some("a\nc\n".into()),
+            content_digest: None,
             diffed: true,
         }
     }
@@ -707,6 +781,7 @@ mod tests {
             is_binary: false,
             old_text: Some(old),
             new_text: Some(new),
+            content_digest: None,
             diffed: true,
         }
     }

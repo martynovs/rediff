@@ -203,6 +203,9 @@ pub fn paint(frame: &mut Frame, app: &App, geo: &Geometry) {
     if app.commit_msg_open() {
         super::overlays::draw_commit_message(frame, geo.body, app);
     }
+    if app.comment_input_state().is_some() {
+        super::overlays::draw_comment(frame, geo.body, app);
+    }
     if app.help_open() {
         super::overlays::draw_help(frame, geo.body, app);
     }
@@ -290,6 +293,9 @@ fn status_info(app: &App) -> String {
                 format!(" peek · {} · {pct}%  ", p.label())
             }
         }),
+        InputContext::Comment => app
+            .comment_input_state()
+            .map_or_else(String::new, |c| format!(" {} ", c.title())),
         // Help never reaches here (draw_status early-returns for it); the
         // palette / theme picker overlay the base, whose counters stay shown.
         InputContext::Help
@@ -300,7 +306,7 @@ fn status_info(app: &App) -> String {
             let total = app.cs().files.len().max(1);
             // Percentage tracks the layout actually on screen (split rows differ
             // from stack rows).
-            let pct = scroll_pct(app.state().scroll, app.plan().rows.len());
+            let pct = scroll_pct(app.state().cursor_row, app.plan().rows.len());
             let mode = match app.layout {
                 LayoutMode::Split => "split",
                 LayoutMode::Stack => "stack",
@@ -460,6 +466,7 @@ mod tests {
             is_binary: false,
             old_text: Some("a\nb\n".into()),
             new_text: Some("a\nc\n".into()),
+            content_digest: None,
             diffed: true,
         }
     }

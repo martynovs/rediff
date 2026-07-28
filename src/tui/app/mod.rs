@@ -11,6 +11,7 @@
 //! reached via `super::<sub>::…`.
 
 mod appcore;
+mod comment;
 mod nav;
 mod overlays;
 mod peekview;

@@ -49,7 +49,11 @@ pub struct Enumeration {
 }
 
 /// What to load.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` matters beyond convenience: the review store records a target as a
+/// canonical string, and the property that string must have is that it parses back
+/// *equal* to what was encoded (`reviewcli::target`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadRequest {
     /// Working-tree changes (`base` vs worktree, `base` defaulting to HEAD).
     /// `include_untracked` adds untracked files.

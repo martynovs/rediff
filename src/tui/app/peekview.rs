@@ -557,6 +557,7 @@ mod tests {
             is_binary: false,
             old_text: old.map(Into::into),
             new_text: new.map(Into::into),
+            content_digest: None,
             diffed: true,
         }
     }

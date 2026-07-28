@@ -91,6 +91,7 @@ mod tests {
             is_binary: false,
             old_text: None,
             new_text: None,
+            content_digest: None,
             diffed: true,
         }
     }

@@ -10,6 +10,7 @@ mod keymap;
 mod loader;
 mod peek;
 mod review;
+mod reviewlog;
 mod rows;
 mod runtime;
 mod session;
