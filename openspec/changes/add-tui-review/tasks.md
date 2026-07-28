@@ -50,19 +50,19 @@ Capturing review points in the TUI the human already uses, so an agent can grab 
 
 ## 4. Seeing what has been said
 
-- [ ] 4.1 Fold the log into a per-`(path, side, line)` index of live threads, resolved against the current changeset. Rebuild **on our own appends** — nothing watches the file, and replaying plus re-resolving on the 100 ms poll tick would re-read the log and re-split every referenced file at 10 Hz.
-- [ ] 4.2 Gutter marker on commented lines in `ui/stream.rs`, for both layouts. `area.x` is taken —
+- [x] 4.1 Fold the log into a per-`(path, side, line)` index of live threads, resolved against the current changeset. Rebuild **on our own appends** — nothing watches the file, and replaying plus re-resolving on the 100 ms poll tick would re-read the log and re-split every referenced file at 10 Hz.
+- [x] 4.2 Gutter marker on commented lines in `ui/stream.rs`, for both layouts. `area.x` is taken —
   `add-line-cursor` put the cursor marker there. But the line-number gutter has a spare column:
   both `render_row` and `cell_spans` emit `format!("{num:>4} ")`, and that trailing space is a
   separator nothing uses, sits in the fixed non-panning prefix, and exists in **both** layouts. Use
   it. (A line number of five or more digits eats it — decide what wins there.)
-- [ ] 4.3 `Overlay::Threads`: the review's threads with body, anchor, and state; `Enter` jumps to the
+- [x] 4.3 `Overlay::Threads`: the review's threads with body, anchor, and state; `Enter` jumps to the
   anchor — and **must move `cursor_row`, not just `scroll`**. `stream::clamp` runs every frame and
   scrolls the viewport back to the cursor, so a scroll-only jump snaps straight back; this is the
   hazard `jump_to_collapsed` documents. `rows::find_key` already resolves an anchor key to a row, so
   it is `find_key` + `scroll_to` + set `cursor_row`.
-- [ ] 4.4 Distinguish `Resolution::Detached` from `Resolution::Unresolved` in the list: during the streaming window every thread in an undiffed file is `Unresolved`, and calling those "detached" is the alarming lie that variant exists to prevent.
-- [ ] 4.5 Tests: marker appears on the right line in both layouts; jump moves the cursor; detached threads listed.
+- [x] 4.4 Distinguish `Resolution::Detached` from `Resolution::Unresolved` in the list: during the streaming window every thread in an undiffed file is `Unresolved`, and calling those "detached" is the alarming lie that variant exists to prevent.
+- [x] 4.5 Tests: marker appears on the right line in both layouts; jump moves the cursor; detached threads listed.
 
 ## 5. Edit, retract, resolve, submit
 

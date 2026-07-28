@@ -31,7 +31,15 @@ impl App {
     /// `rediff review <rev>` is a `ViewKind::Commit` view that *is* a review
     /// session, and `R` promotes a browse view.
     fn can_comment(&self) -> bool {
-        self.is_review() && self.review_log.is_some()
+        self.is_review()
+    }
+
+    /// The worktree's log, or a message explaining its absence.
+    fn log_or_flash(&mut self) -> Option<&crate::review::Log> {
+        if self.review_log.is_none() {
+            self.flash = Some("this repository has no worktree to hold a review log".to_string());
+        }
+        self.review_log.as_ref()
     }
 
     /// Open the comment input on the line under the cursor (`anchored`) or on the
@@ -40,7 +48,7 @@ impl App {
     /// No log I/O happens here. Anchoring is resolved now so an impossible
     /// comment is refused before the user types it.
     pub fn open_comment(&mut self, anchored: bool) {
-        if !self.can_comment() {
+        if !self.can_comment() || self.log_or_flash().is_none() {
             return;
         }
         let anchor = if anchored {
@@ -144,6 +152,7 @@ impl App {
         }))
         .map_err(|e| format!("could not write the review log: {e}"))?;
 
+        self.refresh_thread_marks();
         // The ignore hint rides on a *fresh* review — the only signal the store
         // gives that a log has just appeared in the worktree.
         if opening.opened == crate::review::Opened::Fresh {
@@ -153,6 +162,96 @@ impl App {
             );
         }
         Ok(())
+    }
+
+    /// The thread list, if it is open.
+    pub fn thread_list(&self) -> Option<&crate::tui::app::types::ThreadList> {
+        match self.mode.overlay() {
+            Some(Overlay::Threads(l)) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// Open the list of the review's live threads, resolved against this view.
+    pub fn open_threads(&mut self) {
+        if !self.can_comment() {
+            return;
+        }
+        let Some(log) = self.log_or_flash() else {
+            return;
+        };
+        let Ok(st) = log.state() else {
+            self.flash = Some("could not read the review log".to_string());
+            return;
+        };
+        let cs = self.cs().clone();
+        let threads = crate::tui::reviewlog::live_threads(&st, &cs);
+        if threads.is_empty() {
+            self.flash = Some("no review points yet — `a` comments on a line".to_string());
+            return;
+        }
+        self.mode
+            .push_overlay(Overlay::Threads(crate::tui::app::types::ThreadList::new(
+                threads,
+            )));
+    }
+
+    pub fn threads_move(&mut self, delta: isize) {
+        if let Some(Overlay::Threads(l)) = self.mode.overlay_mut() {
+            l.move_by(delta);
+        }
+    }
+
+    pub fn threads_close(&mut self) {
+        self.mode.pop_overlay();
+    }
+
+    /// Jump to the selected thread's line and close the list.
+    ///
+    /// Moves `cursor_row`, not just `scroll`: `stream::clamp` runs every frame
+    /// and scrolls the viewport back to the cursor, so a scroll-only jump snaps
+    /// straight back — the hazard `jump_to_collapsed` documents.
+    pub fn threads_jump(&mut self) {
+        // Resolved in one step, and matching `previous_path` as `review::resolve`
+        // does: after a rename the anchor still carries the *old* path, so a
+        // lookup on `f.path` alone would refuse to jump to a line that is right
+        // there.
+        let target = self.thread_list().and_then(|l| {
+            let (path, side, line) = l.current()?.key.as_ref()?;
+            let fi = self.cs().files.iter().position(|f| {
+                f.path == *path || f.previous_path.as_deref() == Some(path.as_str())
+            })?;
+            Some((fi, *side, *line))
+        });
+        let Some(key) = target else {
+            self.flash = Some("that comment's line is not in this diff".to_string());
+            return;
+        };
+        let Some(row) = crate::tui::rows::find_key(self.plan(), key) else {
+            self.flash = Some("that comment's line is not shown here".to_string());
+            return;
+        };
+        self.threads_close();
+        let vh = self.viewport_h;
+        let e = self.session.cur_mut();
+        let usable = crate::tui::stream::usable(&e.plan, vh);
+        crate::tui::stream::scroll_to(&mut e.state, &e.plan, usable, row);
+        e.state.cursor_row = row;
+        crate::tui::stream::anchor_selected(&mut e.state, &e.plan);
+    }
+
+    /// Re-index the review's live threads against the current changeset.
+    ///
+    /// Called after *our own* appends only. Nothing watches the log, so there is
+    /// no other moment at which it can change under us.
+    pub(crate) fn refresh_thread_marks(&mut self) {
+        let Some(log) = self.review_log.as_ref() else {
+            return;
+        };
+        let Ok(st) = log.state() else { return };
+        let cs = self.cs().clone();
+        let live = crate::tui::reviewlog::live_threads(&st, &cs);
+        self.thread_marks = crate::tui::reviewlog::thread_index(&live, &cs);
     }
 
     /// The encoded review target for the current view, from its `LoadRequest`.
@@ -520,6 +619,354 @@ mod tests {
             "hi",
             "Ctrl chords are not text in the one buffer that gets persisted"
         );
+    }
+
+    #[test]
+    fn a_comment_marks_its_line_in_the_gutter() {
+        let (_d, mut app) = app_with_log();
+        assert!(
+            app.thread_marks.is_empty(),
+            "nothing marked before commenting"
+        );
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "look here");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        // Keyed on the cursor's own key type: file index, side, line.
+        assert_eq!(
+            app.thread_marks.get(&(0, crate::review::Side::New, 1)),
+            Some(&1),
+            "the commented line is marked: {:?}",
+            app.thread_marks
+        );
+    }
+
+    #[test]
+    fn the_thread_list_opens_jumps_and_moves_the_cursor() {
+        let (_d, mut app) = app_with_log();
+        // Nothing recorded yet: the list says so rather than opening empty.
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(app.thread_list().is_none());
+        assert!(app.flash.as_deref().unwrap().contains("no review points"));
+
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "here");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let commented_row = app.state().cursor_row;
+
+        // Move away, then jump back from the list.
+        app.top();
+        assert_ne!(app.state().cursor_row, commented_row);
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app.thread_list().unwrap().threads.len(), 1);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(app.thread_list().is_none(), "the list closes on a jump");
+        assert_eq!(
+            app.state().cursor_row,
+            commented_row,
+            "the jump moves the cursor, not just the viewport — `clamp` would \
+             scroll straight back otherwise"
+        );
+    }
+
+    #[test]
+    fn a_retracted_thread_is_not_listed_and_a_resolved_one_is_flagged() {
+        let (dir, mut app) = app_with_log();
+        let log = Log::at_worktree(dir.path());
+        handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+        type_str(&mut app, "keep me");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        // A retracted thread and a resolved one, written directly.
+        for (id, deleted, resolved) in [("gone", true, false), ("done", false, true)] {
+            log.append(&crate::review::Record::Thread(crate::review::Thread {
+                id: id.into(),
+                anchor: None,
+                body: id.into(),
+                replace: None,
+                resolved,
+                deleted,
+                at: crate::review::now(),
+            }))
+            .unwrap();
+        }
+
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        let list = app.thread_list().unwrap();
+        let bodies: Vec<&str> = list.threads.iter().map(|t| t.body.as_str()).collect();
+        assert!(
+            !bodies.contains(&"gone"),
+            "retracted is not shown: {bodies:?}"
+        );
+        assert!(bodies.contains(&"done"), "resolved is still shown, flagged");
+        let done = list.threads.iter().find(|t| t.body == "done").unwrap();
+        assert_eq!(done.state_label(), "resolved");
+    }
+
+    #[test]
+    fn a_thread_in_a_file_that_is_still_loading_says_loading_not_detached() {
+        // The lie `Unresolved` exists to prevent: during a streaming load every
+        // anchor in an undiffed file would otherwise read as "your code is gone".
+        let (dir, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "on a line");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        let st = Log::at_worktree(dir.path()).state().unwrap();
+        let mut loading = cs_one_file();
+        loading.files[0].diffed = false;
+        let live = crate::tui::reviewlog::live_threads(&st, &loading);
+        assert_eq!(live[0].state_label(), "loading");
+
+        // ...and genuinely gone is a different word.
+        let empty = Changeset {
+            source: "wt".into(),
+            files: Vec::new(),
+        };
+        let live = crate::tui::reviewlog::live_threads(&st, &empty);
+        assert_eq!(live[0].state_label(), "detached");
+    }
+
+    #[test]
+    fn the_thread_list_keys_move_close_and_ignore_the_rest() {
+        let (_d, mut app) = app_with_log();
+        for body in ["one", "two", "three"] {
+            handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+            type_str(&mut app, body);
+            handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app.thread_list().unwrap().selected, 0);
+
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.thread_list().unwrap().selected, 2);
+        // Clamped, not wrapping.
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.thread_list().unwrap().selected, 2);
+        handle_key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.thread_list().unwrap().selected, 0);
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.thread_list().unwrap().selected, 0, "clamped at the top");
+
+        // An unhandled key does nothing; `q` closes like Esc.
+        handle_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+        assert!(app.thread_list().is_some());
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.thread_list().is_none());
+    }
+
+    #[test]
+    fn jumping_to_an_unanchored_or_absent_thread_says_so() {
+        let (_d, mut app) = app_with_log();
+        // A review-level comment has no line to jump to.
+        handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+        type_str(&mut app, "overall");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.thread_list().is_some(), "the list stays open");
+        assert!(app.flash.as_deref().unwrap().contains("not in this diff"));
+    }
+
+    #[test]
+    fn jumping_with_no_list_open_is_inert() {
+        // Not reachable through the router — the key only dispatches while the
+        // list is up — so it is exercised directly rather than left uncovered.
+        let (_d, mut app) = app_with_log();
+        let before = app.state().cursor_row;
+        app.threads_jump();
+        assert_eq!(app.state().cursor_row, before);
+    }
+
+    #[test]
+    fn without_a_log_both_openers_say_why() {
+        let (_d, mut app) = app_with_log();
+        app.attach_review_log(None, false);
+
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(app.thread_list().is_none(), "no log, nothing to list");
+        assert!(app.flash.as_deref().unwrap().contains("no worktree"));
+
+        app.flash = None;
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(
+            app.comment_input_state().is_none(),
+            "and nothing to write to"
+        );
+        assert!(app.flash.as_deref().unwrap().contains("no worktree"));
+
+        app.refresh_thread_marks();
+        assert!(app.thread_marks.is_empty());
+    }
+
+    #[test]
+    fn a_view_with_no_load_request_cannot_record_a_target() {
+        // `push_test_view` builds a view with `req: None`; nothing in production
+        // does, but the arm must not silently write a review against nothing.
+        let cs = cs_one_file();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_launch(
+            &cs,
+            LayoutMode::Stack,
+            crate::tui::theme::ThemeName::Dark,
+            Some(dir.path().to_path_buf()),
+            crate::tui::ViewKind::Local,
+            true,
+            None,
+            None, // no LoadRequest
+        );
+        app.viewport_h = 12;
+        app.attach_review_log(Some(Log::at_worktree(dir.path())), false);
+        handle_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE);
+        type_str(&mut app, "anything");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.comment_input_state().is_some(), "stays open");
+        assert!(app
+            .comment_input_state()
+            .unwrap()
+            .refusal
+            .as_deref()
+            .unwrap()
+            .contains("no target"));
+        assert!(!Log::at_worktree(dir.path()).path().exists());
+    }
+
+    #[test]
+    fn a_comment_survives_a_rename_and_still_jumps() {
+        // `review::resolve` matches `previous_path`, so the anchor keeps the old
+        // path. A jump keyed on `f.path` alone would refuse a line that is there.
+        let (dir, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "still here");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        let mut renamed = cs_one_file();
+        renamed.files[0].path = "b.rs".into();
+        renamed.files[0].previous_path = Some("a.rs".into());
+        let mut app2 = App::with_launch(
+            &renamed,
+            LayoutMode::Stack,
+            crate::tui::theme::ThemeName::Dark,
+            Some(dir.path().to_path_buf()),
+            crate::tui::ViewKind::Local,
+            true,
+            None,
+            Some(crate::git::LoadRequest::Staged),
+        );
+        app2.viewport_h = 12;
+        app2.attach_review_log(Some(Log::at_worktree(dir.path())), false);
+
+        handle_key(&mut app2, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app2.thread_list().unwrap().threads.len(), 1);
+        handle_key(&mut app2, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app2.thread_list().is_none(), "the jump succeeded");
+        assert!(app2.state().cursor_row > 0, "and landed on the line");
+    }
+
+    #[test]
+    fn every_thread_state_has_its_own_label() {
+        use crate::review::Resolution;
+        use crate::tui::reviewlog::LiveThread;
+        let mk = |placement, resolved| LiveThread {
+            id: "t".into(),
+            body: "b".into(),
+            resolved,
+            placement,
+            path: Some("a.rs".into()),
+            key: None,
+        };
+        assert_eq!(
+            mk(Some(Resolution::Attached { line: 1 }), false).state_label(),
+            "here"
+        );
+        assert_eq!(
+            mk(Some(Resolution::Shifted { from: 1, to: 2 }), false).state_label(),
+            "moved"
+        );
+        assert_eq!(
+            mk(Some(Resolution::Detached), false).state_label(),
+            "detached"
+        );
+        assert_eq!(
+            mk(Some(Resolution::Unresolved), false).state_label(),
+            "loading"
+        );
+        assert_eq!(mk(None, false).state_label(), "review");
+        assert_eq!(
+            mk(Some(Resolution::Detached), true).state_label(),
+            "resolved"
+        );
+    }
+
+    #[test]
+    fn jumping_to_a_thread_whose_file_left_the_view_says_so() {
+        // The two remaining arms: the anchored file is not in this changeset,
+        // and it is but the line has no row in the current plan.
+        let (dir, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "on a line");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        // Same log, a view whose changeset no longer holds that file.
+        let empty = Changeset {
+            source: "wt".into(),
+            files: Vec::new(),
+        };
+        let mut other = App::with_launch(
+            &empty,
+            LayoutMode::Stack,
+            crate::tui::theme::ThemeName::Dark,
+            Some(dir.path().to_path_buf()),
+            crate::tui::ViewKind::Local,
+            true,
+            None,
+            Some(crate::git::LoadRequest::Staged),
+        );
+        other.attach_review_log(Some(Log::at_worktree(dir.path())), false);
+        handle_key(&mut other, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(other.thread_list().is_some(), "the thread still lists");
+        handle_key(&mut other, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(other.thread_list().is_some(), "and the list stays open");
+        assert!(
+            other.flash.as_deref().unwrap().contains("not in this diff"),
+            "{:?}",
+            other.flash
+        );
+    }
+
+    #[test]
+    fn jumping_into_a_collapsed_file_says_the_line_is_not_shown() {
+        // The file is still in the changeset, but marking it reviewed collapses
+        // its body to a placeholder, so the anchored line has no row to jump to.
+        let (_d, mut app) = app_with_log();
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut app, "on a line");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        handle_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(app.state().viewed[0], "the file is collapsed");
+
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.thread_list().is_some(), "the list stays open");
+        assert!(
+            app.flash.as_deref().unwrap().contains("not shown here"),
+            "{:?}",
+            app.flash
+        );
+    }
+
+    #[test]
+    fn opening_the_list_on_an_unreadable_log_reports_it() {
+        let (dir, mut app) = app_with_log();
+        // A directory where the log should be: `state()` fails to read it.
+        std::fs::create_dir_all(dir.path().join("rediff.jsonl")).unwrap();
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(app.thread_list().is_none());
+        assert!(app.flash.is_some(), "the user is told, not left guessing");
     }
 
     #[test]

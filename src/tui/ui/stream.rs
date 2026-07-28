@@ -228,6 +228,26 @@ fn draw_cursor_marker(frame: &mut Frame, area: Rect, app: &App, sticky: bool) {
     }
 }
 
+/// Marker for a line carrying a live review comment.
+///
+/// It goes in the gutter's trailing separator column — `format!("{num:>4} ")` —
+/// which nothing else uses and which exists in both layouts. The cursor marker
+/// already owns the one column outside the content area.
+///
+/// A line number of five or more digits eats the separator; the number wins,
+/// since losing a digit would be worse than losing the mark.
+fn comment_mark(app: &App, file: usize, side_new: bool, lineno: Option<u32>) -> char {
+    let side = if side_new {
+        crate::review::Side::New
+    } else {
+        crate::review::Side::Old
+    };
+    match lineno {
+        Some(n) if app.thread_marks.contains_key(&(file, side, n)) => '\u{2022}',
+        _ => ' ',
+    }
+}
+
 pub(super) fn draw_stack(frame: &mut Frame, area: Rect, app: &App) {
     let inner = Rect {
         x: area.x + 1,
@@ -476,8 +496,12 @@ fn cell_spans(
         LineKind::Removed => ('-', t.removed),
         LineKind::Context => (' ', t.muted),
     };
+    let mark = comment_mark(app, c.file, c.side_new, c.lineno);
     let mut spans = vec![
-        Span::styled(format!("{num:>4} "), with_bg(Style::default().fg(t.muted))),
+        Span::styled(
+            format!("{num:>4}{mark}"),
+            with_bg(Style::default().fg(if mark == ' ' { t.muted } else { t.accent })),
+        ),
         Span::styled(sign.to_string(), with_bg(Style::default().fg(sign_color))),
     ];
 
@@ -682,9 +706,13 @@ pub(super) fn render_row<'a>(
             // fixed; only the code body pans.
             body = skip_cols(body, h_scroll);
 
+            let mark = comment_mark(app, *file, side_new, lineno);
             let mut spans = gutter.unwrap_or_else(|| {
                 vec![
-                    Span::styled(format!("{num:>4} "), Style::default().fg(t.muted)),
+                    Span::styled(
+                        format!("{num:>4}{mark}"),
+                        Style::default().fg(if mark == ' ' { t.muted } else { t.accent }),
+                    ),
                     Span::styled(sign.to_string(), Style::default().fg(sign_color)),
                 ]
             });

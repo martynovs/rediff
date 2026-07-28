@@ -806,6 +806,63 @@ fn the_comment_overlay_shows_a_refusal_and_the_tail_of_a_long_line() {
 }
 
 #[test]
+fn the_gutter_marks_a_commented_line_and_the_list_renders() {
+    // The marker lives in the gutter's trailing separator column, which exists
+    // in both layouts — `area.x` is taken by the cursor marker.
+    for layout in [LayoutMode::Stack, LayoutMode::Split] {
+        let cs = big_sample();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_launch(
+            &cs,
+            layout,
+            crate::tui::theme::ThemeName::Dark,
+            Some(dir.path().to_path_buf()),
+            crate::tui::ViewKind::Local,
+            true,
+            None,
+            Some(crate::git::LoadRequest::Staged),
+        );
+        app.attach_review_log(Some(crate::review::Log::at_worktree(dir.path())), false);
+        let mut term = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+        // Land on a real diff line, then comment on it.
+        handle_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        for c in "look at this".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            !app.thread_marks.is_empty(),
+            "a mark was recorded ({layout:?})"
+        );
+        term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+        let buf = term.backend().buffer().clone();
+        let marked = (0..16u16).any(|y| (0..100u16).any(|x| buf[(x, y)].symbol() == "\u{2022}"));
+        assert!(marked, "the gutter shows the comment marker in {layout:?}");
+
+        // And the list draws the body and where it sits.
+        handle_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        term.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..16u16 {
+            for x in 0..100u16 {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        assert!(
+            out.contains("look at this"),
+            "the list shows the body: {out}"
+        );
+        assert!(out.contains("review points"), "and is titled");
+    }
+}
+
+#[test]
 fn wrap_mode_draws_no_cursor_marker() {
     // One plan row spends several drawn lines under `wrap`, so `cursor_row -
     // scroll` stops being the drawn line. A marker placed by that arithmetic

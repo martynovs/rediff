@@ -219,7 +219,7 @@ fn dispatch_event(app: &mut App, ev: &Event) -> bool {
                 }
                 // Composing a comment absorbs the mouse entirely: there is
                 // nothing to scroll and a click must not reach the diff behind.
-                InputContext::Comment => true,
+                InputContext::Comment | InputContext::Threads => true,
                 // While the peek is open, the wheel scrolls it; clicks are ignored.
                 InputContext::Peek => {
                     if let Some(d) = wheel {

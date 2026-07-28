@@ -48,6 +48,7 @@ pub(crate) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         InputContext::Palette => handle_palette_key(app, code),
         InputContext::ThemePicker => handle_theme_picker_key(app, code),
         InputContext::Comment => handle_comment_key(app, code, mods),
+        InputContext::Threads => handle_threads_key(app, code),
         // The single-file peek base captures all input while open.
         InputContext::Peek => handle_peek_key(app, code, mods),
         InputContext::Normal => handle_base_key(app, code, mods),
@@ -94,6 +95,17 @@ fn handle_base_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     handle_focus_key(app, code, mods);
 }
 
+/// The thread list: move the selection, jump to one, or close.
+fn handle_threads_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => app.threads_close(),
+        KeyCode::Enter => app.threads_jump(),
+        KeyCode::Down | KeyCode::Char('j') => app.threads_move(1),
+        KeyCode::Up | KeyCode::Char('k') => app.threads_move(-1),
+        _ => {}
+    }
+}
+
 /// Review-point keys, live in either pane.
 ///
 /// Its own handler rather than an arm in `handle_global_key`, which sits at CRAP
@@ -104,6 +116,7 @@ fn handle_review_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         KeyCode::Char('a') => app.open_comment(true),
         KeyCode::Char('A') => app.open_comment(false),
+        KeyCode::Char('n') => app.open_threads(),
         _ => return false,
     }
     true

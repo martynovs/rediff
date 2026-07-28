@@ -4,12 +4,15 @@
 //! viewed-tracking over `ViewState`. Everything here talks to `crate::review`,
 //! the on-disk log, and the two are easy to confuse.
 
+use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::model::Changeset;
-use crate::review::{capture, open_review, open_round, Anchor, Log, Opened};
-use crate::tui::rows::{self, Plan};
+use crate::review::{
+    capture, open_review, open_round, resolve, Anchor, Log, Opened, Resolution, ReviewState, Side,
+};
+use crate::tui::rows::{self, Key, Plan};
 
 /// Why the cursor's row could not be turned into an anchor.
 ///
@@ -169,6 +172,92 @@ pub fn ensure_review(
     // content actually changed since the last one.
     let round = open_round(log, &st, cs, false)?;
     Ok(Opening { opened, round })
+}
+
+/// One thread as the TUI shows it: its record plus where it sits *now*.
+#[derive(Debug, Clone)]
+pub struct LiveThread {
+    /// Superseding a thread means reusing its id, so edit/retract/resolve all
+    /// need this. Nothing reads it until those land — and the expectation will
+    /// fail the zero-warning gate the moment they do, which is the point.
+    #[expect(
+        dead_code,
+        reason = "the handle edit/retract/resolve will supersede by; unread until then"
+    )]
+    pub id: String,
+    pub body: String,
+    pub resolved: bool,
+    /// Where the anchor lands in the current changeset. `None` for a
+    /// review-level comment, which has no anchor to resolve.
+    pub placement: Option<Resolution>,
+    /// The anchored file's path, for display.
+    pub path: Option<String>,
+    /// The key to jump to, when the anchor still resolves to a line.
+    pub key: Option<(String, Side, u32)>,
+}
+
+impl LiveThread {
+    /// A short state label for the list.
+    ///
+    /// `Unresolved` is deliberately not called "detached": during a streaming
+    /// load every thread in an undiffed file is unresolved, and telling the user
+    /// their code is gone would be the alarming lie that variant exists to
+    /// prevent.
+    pub fn state_label(&self) -> &'static str {
+        match (&self.placement, self.resolved) {
+            (_, true) => "resolved",
+            (None, _) => "review",
+            (Some(Resolution::Attached { .. }), _) => "here",
+            (Some(Resolution::Shifted { .. }), _) => "moved",
+            (Some(Resolution::Detached), _) => "detached",
+            (Some(Resolution::Unresolved), _) => "loading",
+        }
+    }
+}
+
+/// The review's live threads, resolved against `cs`, in record order.
+///
+/// Deleted threads are dropped: retracted feedback is not shown, though it stays
+/// on disk. Resolved ones are kept and flagged — resolving marks a thread done,
+/// it does not hide it.
+pub fn live_threads(st: &ReviewState, cs: &Changeset) -> Vec<LiveThread> {
+    st.threads
+        .values()
+        .filter(|t| !t.thread.deleted)
+        .map(|t| {
+            let a = t.thread.anchor.as_ref();
+            let placement = a.map(|a| resolve(a, cs));
+            let key = a
+                .zip(placement.as_ref())
+                .and_then(|(a, r)| r.line().map(|line| (a.path.clone(), a.side, line)));
+            LiveThread {
+                id: t.thread.id.clone(),
+                body: t.thread.body.clone(),
+                resolved: t.thread.resolved,
+                placement,
+                path: a.map(|a| a.path.clone()),
+                key,
+            }
+        })
+        .collect()
+}
+
+/// Live threads indexed by where they currently sit, for the gutter.
+///
+/// Keyed on `(file index, side, line)` — the cursor's own key type — rather than
+/// on the path, so the renderer's per-row lookup allocates nothing. Resolving
+/// path to index happens once here instead of once per drawn row per frame.
+pub fn thread_index(threads: &[LiveThread], cs: &Changeset) -> HashMap<Key, usize> {
+    let index_of = |path: &str| cs.files.iter().position(|f| f.path == path);
+    let mut ix: HashMap<Key, usize> = HashMap::new();
+    for t in threads {
+        if let Some((path, side, line)) = t.key.as_ref() {
+            if let Some(fi) = index_of(path) {
+                *ix.entry((fi, *side, *line)).or_default() += 1;
+            }
+        }
+    }
+    ix
 }
 
 #[cfg(test)]

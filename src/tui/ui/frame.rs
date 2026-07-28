@@ -203,6 +203,9 @@ pub fn paint(frame: &mut Frame, app: &App, geo: &Geometry) {
     if app.commit_msg_open() {
         super::overlays::draw_commit_message(frame, geo.body, app);
     }
+    if app.thread_list().is_some() {
+        super::overlays::draw_threads(frame, geo.body, app);
+    }
     if app.comment_input_state().is_some() {
         super::overlays::draw_comment(frame, geo.body, app);
     }
@@ -292,6 +295,9 @@ fn status_info(app: &App) -> String {
             } else {
                 format!(" peek · {} · {pct}%  ", p.label())
             }
+        }),
+        InputContext::Threads => app.thread_list().map_or_else(String::new, |l| {
+            format!(" comments · {}/{} ", l.selected + 1, l.threads.len().max(1))
         }),
         InputContext::Comment => app
             .comment_input_state()

@@ -108,6 +108,7 @@ impl App {
             hl,
             flash: None,
             review_log: None,
+            thread_marks: std::collections::HashMap::new(),
             launch_filtered: false,
             should_quit: false,
         }

@@ -528,6 +528,72 @@ pub(super) fn draw_commit_message(frame: &mut Frame, body: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), content);
 }
 
+/// The review's threads: one row each, with where the anchor sits now.
+pub(super) fn draw_threads(frame: &mut Frame, body: Rect, app: &App) {
+    let Some(list) = app.thread_list() else {
+        return;
+    };
+    let t = &app.theme;
+    let accent = t.accent;
+    let w = (body.width.saturating_mul(8) / 10)
+        .max(30)
+        .min(body.width.saturating_sub(2));
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a review's thread count is far below u16::MAX; clamped to the body height"
+    )]
+    let rows = (list.threads.len() as u16).clamp(1, body.height.saturating_sub(4));
+    let inner = popup_frame(
+        frame,
+        body,
+        w,
+        rows.saturating_add(2),
+        3,
+        accent,
+        t.bg,
+        Padding::new(1, 1, 0, 0),
+        Line::from(Span::styled(
+            format!(" review points · {} ", list.threads.len()),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+    );
+
+    // Window the list so the selection stays visible.
+    let h = inner.height as usize;
+    let top = list.selected.saturating_sub(h.saturating_sub(1));
+    let lines: Vec<Line> = list
+        .threads
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(h)
+        .map(|(i, th)| {
+            let where_ = th.path.as_deref().map_or_else(
+                || "review".to_string(),
+                |p| match th.placement.as_ref().and_then(|r| r.line()) {
+                    Some(n) => format!("{p}:{n}"),
+                    None => p.to_string(),
+                },
+            );
+            let spans = vec![
+                Span::styled(
+                    format!("{:<9} ", th.state_label()),
+                    Style::default().fg(if th.resolved { t.muted } else { accent }),
+                ),
+                Span::styled(format!("{where_}  "), Style::default().fg(t.muted)),
+                Span::styled(th.body.clone(), Style::default().fg(t.context)),
+            ];
+            let line = Line::from(spans);
+            if i == list.selected {
+                line.style(Style::default().bg(t.sel_focus_bg))
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// The comment input: a titled one-line box over whatever summoned it.
 pub(super) fn draw_comment(frame: &mut Frame, body: Rect, app: &App) {
     let Some(input) = app.comment_input_state() else {

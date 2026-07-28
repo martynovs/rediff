@@ -463,6 +463,7 @@ impl App {
             Some(Overlay::Palette(_)) => InputContext::Palette,
             Some(Overlay::ThemePicker(_)) => InputContext::ThemePicker,
             Some(Overlay::Comment(_)) => InputContext::Comment,
+            Some(Overlay::Threads(_)) => InputContext::Threads,
             None if self.peek_open() => InputContext::Peek,
             None => InputContext::Normal,
         }
@@ -479,6 +480,7 @@ impl App {
             InputContext::Help => &[],
             InputContext::CommitMsg => k::BIND_COMMITMSG,
             InputContext::Comment => k::BIND_COMMENT,
+            InputContext::Threads => k::BIND_THREADS,
             InputContext::ThemePicker => k::BIND_THEME,
             InputContext::Palette => {
                 if self.commit_palette_open() {

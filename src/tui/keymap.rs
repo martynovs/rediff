@@ -66,6 +66,7 @@ pub const HELP_RIGHT: &[HelpSection] = &[
             ("u", "next unreviewed"),
             ("R", "review commit"),
             ("a", "comment on line"),
+            ("n", "list comments"),
             ("A", "comment on review"),
             ("Enter", "save comment"),
             ("esc", "discard comment"),
@@ -158,6 +159,9 @@ pub const BIND_COMMITMSG: &[Binding] = &[
 /// Composing a review comment.
 pub const BIND_COMMENT: &[Binding] = &[b("Enter", "save"), b("esc", "discard")];
 
+/// The review's thread list.
+pub const BIND_THREADS: &[Binding] = &[b("jk", "select"), b("Enter", "jump"), b("esc", "close")];
+
 /// The fuzzy file palette.
 pub const BIND_PALETTE_FILE: &[Binding] = &[
     b("", "type to filter"),
@@ -221,6 +225,7 @@ mod tests {
         BIND_PEEK_BLAME,
         BIND_COMMITMSG,
         BIND_COMMENT,
+        BIND_THREADS,
         BIND_PALETTE_FILE,
         BIND_PALETTE_COMMIT,
         BIND_THEME,

@@ -79,6 +79,8 @@ pub enum Overlay {
     /// Composing a review comment. Pushed over whatever summoned it, so editing
     /// a thread from the thread list returns to the list.
     Comment(CommentInput),
+    /// The review's threads, with a selection.
+    Threads(ThreadList),
 }
 
 /// Which surface captures input right now, resolved by [`App::active_context`]
@@ -91,8 +93,40 @@ pub enum InputContext {
     Palette,
     ThemePicker,
     Comment,
+    Threads,
     Peek,
     Normal,
+}
+
+/// The review's live threads, with a cursor over them.
+pub struct ThreadList {
+    pub threads: Vec<crate::tui::reviewlog::LiveThread>,
+    pub selected: usize,
+}
+
+impl ThreadList {
+    pub fn new(threads: Vec<crate::tui::reviewlog::LiveThread>) -> Self {
+        Self {
+            threads,
+            selected: 0,
+        }
+    }
+
+    pub fn current(&self) -> Option<&crate::tui::reviewlog::LiveThread> {
+        self.threads.get(self.selected)
+    }
+
+    /// Move the selection, clamped — a list this short does not wrap.
+    pub fn move_by(&mut self, delta: isize) {
+        let last = self.threads.len().saturating_sub(1);
+        #[expect(
+            clippy::cast_possible_wrap,
+            clippy::cast_sign_loss,
+            reason = "a review's thread count is far below isize::MAX; clamped to >= 0 before the cast back"
+        )]
+        let next = (self.selected as isize + delta).clamp(0, last as isize) as usize;
+        self.selected = next;
+    }
 }
 
 /// Composing a review comment.
@@ -257,6 +291,12 @@ pub struct App {
     /// The worktree's review log, resolved once at launch. `None` when the app
     /// was not launched from a worktree (or in tests that do not need one).
     pub review_log: Option<crate::review::Log>,
+    /// Lines carrying a live review comment, for the gutter marker.
+    ///
+    /// Rebuilt only when *we* append to the log: nothing watches the file, and
+    /// replaying plus re-resolving on the 100 ms poll tick would re-read the log
+    /// and re-split every referenced file at 10 Hz.
+    pub thread_marks: std::collections::HashMap<crate::tui::rows::Key, usize>,
     /// Whether the launch view was narrowed by path filters. Only the launch
     /// view can be: every pushed view loads a whole target. A round hashed over
     /// a subset would make the next unfiltered `rediff request` report every
