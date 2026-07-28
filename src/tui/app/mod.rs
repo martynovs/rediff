@@ -17,5 +17,6 @@ mod overlays;
 mod peekview;
 mod submit;
 mod types;
+mod viewed;
 
 pub use types::*;

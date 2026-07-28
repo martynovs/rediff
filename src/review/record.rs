@@ -155,6 +155,33 @@ pub enum Record {
         /// Why it stopped.
         reason: String,
     },
+    /// Which files the user has marked reviewed, as of this record.
+    ///
+    /// A whole-set snapshot, not a per-file toggle: `v` is the most-pressed key
+    /// in the TUI, and a log that grew a line per press would be mostly this.
+    /// The paths are what restoration keys on — a changeset's file order differs
+    /// between sessions, so a positional record would restore the wrong files.
+    ///
+    /// Fold-inert by design: it is not feedback, so it neither pins the review
+    /// against replacement nor gives a consumer anything to drain. See
+    /// [`Record::Unknown`] for why that is a requirement and not just a choice.
+    Viewed {
+        /// Reviewed paths, sorted, so the line is stable and diffable.
+        paths: Vec<String>,
+    },
+    /// A record this build does not know.
+    ///
+    /// Without this arm a log written by a newer rediff replays as *unparseable*
+    /// lines, which pins `safe_to_replace()` false forever: `rediff request`
+    /// then refuses to start a review on a log that holds no feedback at all,
+    /// and there is no way out but deleting the file.
+    ///
+    /// The price is the constraint that goes with it: **every variant added from
+    /// here on must be fold-inert**, because an older build will silently ignore
+    /// it. Anything that is feedback, or that gates replacement, needs a
+    /// different mechanism — not another variant.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The current time as an RFC 3339 string, for a record's `at` field.
@@ -283,12 +310,27 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tag_does_not_parse_so_replay_can_skip_it() {
-        let err = serde_json::from_str::<Record>(r#"{"t":"telepathy","body":"?"}"#);
-        assert!(
-            err.is_err(),
-            "an unknown t is rejected, not silently coerced"
-        );
+    fn an_unknown_tag_reads_as_unknown_rather_than_failing_to_parse() {
+        // The forward-compatibility arm. Without it a log written by a newer
+        // rediff replays as unparseable lines, which pins `safe_to_replace()`
+        // false forever and wedges `rediff request` on a log holding no feedback.
+        let rec: Record = serde_json::from_str(r#"{"t":"telepathy","body":"?"}"#).unwrap();
+        assert_eq!(rec, Record::Unknown);
+        // A torn or non-JSON line is still a parse failure, which is the
+        // distinction that matters: "from the future" and "damaged" are not the
+        // same thing, and only the second should pin the log.
+        serde_json::from_str::<Record>(r#"{"t":"thre"#).unwrap_err();
+        serde_json::from_str::<Record>("not json at all").unwrap_err();
+    }
+
+    #[test]
+    fn a_viewed_record_round_trips_by_path() {
+        let rec = Record::Viewed {
+            paths: vec!["src/a.rs".into(), "src/b.rs".into()],
+        };
+        assert_eq!(roundtrip(&rec), rec);
+        let line = serde_json::to_string(&rec).unwrap();
+        assert!(line.contains(r#""t":"viewed""#), "{line}");
     }
 
     #[test]

@@ -360,7 +360,7 @@ impl App {
     }
 
     /// The encoded review target for the current view, from its `LoadRequest`.
-    fn review_target(&self) -> Option<String> {
+    pub(crate) fn review_target(&self) -> Option<String> {
         let req = self.session.views.get(self.session.cursor)?.req.as_ref()?;
         crate::reviewcli::encode(req).ok()
     }

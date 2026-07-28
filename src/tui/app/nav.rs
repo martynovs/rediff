@@ -446,6 +446,9 @@ impl App {
             return;
         };
         review::toggle(self.state_mut(), idx);
+        // Before the auto-collapse bookkeeping, so every path that changed a
+        // flag records it — including the empty-changeset early return below.
+        self.record_viewed();
         // Auto-collapse: when this toggle completes the file's directory (its last
         // unreviewed file just became reviewed), fold it once — only in a grouped
         // review, and only on the completion edge (re-expanding by hand sticks).

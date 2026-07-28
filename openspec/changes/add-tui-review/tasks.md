@@ -82,15 +82,15 @@ Capturing review points in the TUI the human already uses, so an agent can grab 
 
 ## 7. Persisting reviewed state
 
-- [ ] 7.0 **Prerequisite: make the log format tolerate unknown variants.** Add `#[serde(other)] Unknown` to `Record` and ignore it in `apply`. Verified that serde supports this on an internally-tagged enum. Without it, any new variant is counted `unparsed` by another build, pinning `safe_to_replace()` false and wedging `rediff request` on a log with no feedback in it. Ship this before 7.1, and test that a synthetic `{"t":"viewed",...}` line folds to nothing rather than incrementing `unparsed`.
-- [ ] 7.1 Reviewed files then get their **own** `Record` variant. There is no "optional field on an existing record" to use: every existing variant has a lifecycle effect — `Open` resets the state, `Thread` becomes undelivered feedback (which would make every `v` press something the agent must drain, and is exactly the `request` wedge), `Submit` closes a round, `Round` duplicates one, `Serve`/`Close` pair a server. Only `Drained` is fold-inert and its meaning is the opposite.
-- [ ] 7.2 Record only while a review is **already** open — `v` is the most-pressed key in the app, and writing on it would create a log exactly as lazily opening exists to avoid.
-- [ ] 7.3 Restore by **path**, not index: `ViewState.viewed` is positional over `cs.files` and is seeded at construction, before any log is read, so restoration is a later step keyed on path.
-- [ ] 7.4 Tests: marks survive a reopen; marking with no review open writes nothing; a reordered changeset restores the same files, not the same positions.
+- [x] 7.0 **Prerequisite: make the log format tolerate unknown variants.** Add `#[serde(other)] Unknown` to `Record` and ignore it in `apply`. Verified that serde supports this on an internally-tagged enum. Without it, any new variant is counted `unparsed` by another build, pinning `safe_to_replace()` false and wedging `rediff request` on a log with no feedback in it. Ship this before 7.1, and test that a synthetic `{"t":"viewed",...}` line folds to nothing rather than incrementing `unparsed`.
+- [x] 7.1 Reviewed files then get their **own** `Record` variant. There is no "optional field on an existing record" to use: every existing variant has a lifecycle effect — `Open` resets the state, `Thread` becomes undelivered feedback (which would make every `v` press something the agent must drain, and is exactly the `request` wedge), `Submit` closes a round, `Round` duplicates one, `Serve`/`Close` pair a server. Only `Drained` is fold-inert and its meaning is the opposite.
+- [x] 7.2 Record only while a review is **already** open — `v` is the most-pressed key in the app, and writing on it would create a log exactly as lazily opening exists to avoid.
+- [x] 7.3 Restore by **path**, not index: `ViewState.viewed` is positional over `cs.files` and is seeded at construction, before any log is read, so restoration is a later step keyed on path.
+- [x] 7.4 Tests: marks survive a reopen; marking with no review open writes nothing; a reordered changeset restores the same files, not the same positions.
 
 ## 8. End-to-end
 
-- [ ] 8.1 A PTY test (`tests/tui_pty.rs` has the harness): open the TUI on a dirty worktree, comment on a line, quit — then assert `rediff feedback` returns that comment with the right anchor. This is the whole point of the change and the only test that proves the two halves meet.
+- [x] 8.1 A PTY test (`tests/tui_pty.rs` has the harness): open the TUI on a dirty worktree, comment on a line, quit — then assert `rediff feedback` returns that comment with the right anchor. This is the whole point of the change and the only test that proves the two halves meet.
 - [x] 8.2 A falsifiable regression check, not a suite re-run: assert `rediff diff` on a worktree with a review log open still lists exactly the files it did before, and that the log is absent from it. `git::enumerate` already drops `rediff.jsonl`, so this is a guard against regression, not new work.
 
 ## 9. Gates (per CLAUDE.md, in order)

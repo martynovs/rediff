@@ -87,6 +87,11 @@ pub struct ReviewState {
     pub threads: IndexMap<String, ThreadState>,
     /// Submits with the ordinal each was recorded at.
     pub submits: Vec<(u64, Submit)>,
+    /// Paths the user has marked reviewed, from the most recent `viewed` record.
+    ///
+    /// By path, not position: a changeset's file order differs between sessions,
+    /// so restoring by index would mark the wrong files.
+    pub viewed: Vec<String>,
     /// Ordinal delivered through, from the most recent `drained` record.
     pub drained_upto: u64,
     /// The most recent `serve`, with the ordinal it was recorded at.
@@ -97,9 +102,11 @@ pub struct ReviewState {
     pub last_ordinal: u64,
     /// How many lines did not parse.
     ///
-    /// Non-zero means this build cannot fully read the log — a record type from a
-    /// newer rediff, or a line torn by a crash. Such a log is never replaced, since
-    /// what we cannot read we cannot know to be safe to destroy.
+    /// Non-zero means this build cannot fully read the log — a line torn by a
+    /// crash mid-append, or otherwise corrupt. Such a log is never replaced, since
+    /// what we cannot read we cannot know to be safe to destroy. A *well-formed*
+    /// record whose type this build does not know is not counted here: it folds
+    /// to nothing instead (see [`Record::Unknown`]).
     pub unparsed: u64,
     /// Ordinal of the first line this build could not read, if any.
     ///
@@ -145,9 +152,10 @@ impl ReviewState {
     /// Whether this log may be truncated to start a new review.
     ///
     /// Two independent reasons to refuse: feedback nobody has consumed, and lines
-    /// this build could not parse. The second matters on a downgrade — a log
-    /// written by a newer rediff replays as unparseable lines, which must not read
-    /// as "empty, safe to delete".
+    /// this build could not parse at all. The second is about *damage* — a record
+    /// torn by a crash must not read as "empty, safe to delete". A readable record
+    /// from a newer build does not refuse, deliberately; see [`Record::Unknown`]
+    /// for the constraint that buys.
     #[must_use]
     pub fn safe_to_replace(&self) -> bool {
         self.fully_drained() && self.unparsed == 0
@@ -387,6 +395,11 @@ fn apply(st: &mut ReviewState, ordinal: u64, rec: &Record) {
         }
         Record::Submit(s) => st.submits.push((ordinal, s.clone())),
         Record::Drained { upto } => st.drained_upto = (*upto).max(st.drained_upto),
+        // A whole-set snapshot: the latest one is the answer.
+        Record::Viewed { paths } => st.viewed.clone_from(paths),
+        // Read, understood to be beyond this build, and deliberately ignored —
+        // *not* counted unparsed. See `Record::Unknown`.
+        Record::Unknown => {}
     }
 }
 
@@ -691,7 +704,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tag_is_skipped_by_replay() {
+    fn an_unknown_tag_folds_to_nothing_rather_than_counting_unparsed() {
+        // A record from a newer rediff is read, understood to be beyond this
+        // build, and ignored. Counting it unparsed instead would pin
+        // `safe_to_replace()` false on a log holding no feedback at all, and
+        // `rediff request` would have no way forward but deleting the file.
         let (_d, log) = review_log();
         log.append(&open("r1")).unwrap();
         {
@@ -701,7 +718,38 @@ mod tests {
         }
         let entries = log.replay().unwrap();
         assert_eq!(entries.len(), 2);
-        assert!(entries[1].1.is_none());
+        assert_eq!(entries[1].1, Some(Record::Unknown), "parsed, not skipped");
+
+        let st = log.state().unwrap();
+        assert_eq!(st.unparsed, 0, "it is not damage");
+        assert_eq!(st.first_unparsed, None);
+        assert!(st.safe_to_replace(), "and it does not wedge the log");
+        assert_eq!(st.last_ordinal, 2, "it still consumes its ordinal");
+    }
+
+    #[test]
+    fn viewed_snapshots_replace_and_never_become_work_for_a_consumer() {
+        let (_d, log) = review_log();
+        log.append(&open("r1")).unwrap();
+        log.append(&Record::Viewed {
+            paths: vec!["a.rs".into()],
+        })
+        .unwrap();
+        log.append(&Record::Viewed {
+            paths: vec!["a.rs".into(), "b.rs".into()],
+        })
+        .unwrap();
+
+        let st = log.state().unwrap();
+        assert_eq!(st.viewed, vec!["a.rs", "b.rs"], "the latest snapshot wins");
+        // Inert: not feedback, so nothing to drain and nothing pinning the log.
+        assert!(st.fully_drained(), "a `v` press is not work for the agent");
+        assert!(st.safe_to_replace());
+
+        // A new review starts with an empty reviewed set rather than inheriting
+        // the previous one's — `Open` resets the fold.
+        log.append(&open("r2")).unwrap();
+        assert!(log.state().unwrap().viewed.is_empty());
     }
 
     #[test]
@@ -940,24 +988,27 @@ mod tests {
 
     #[test]
     fn a_log_with_unreadable_records_is_never_replaced() {
-        // A log written by a newer rediff replays as unparseable lines. "Cannot
-        // read it" must not be mistaken for "nothing in it".
+        // A *damaged* line — torn by a crash mid-append, or corrupted — must not
+        // be mistaken for "nothing in it". This is the case that still pins the
+        // log; a well-formed record from a newer build no longer does, which is
+        // the deliberate trade in `Record::Unknown`.
         let (_d, log) = review_log();
         log.append(&open("r1")).unwrap();
         {
             let mut f = OpenOptions::new().append(true).open(log.path()).unwrap();
-            f.write_all(b"{\"t\":\"reply\",\"body\":\"from a newer build\"}\n")
+            f.write_all(b"{\"t\":\"thread\",\"id\":\"t1\",\"body\":\"half a li\n")
                 .unwrap();
         }
         let st = log.state().unwrap();
         assert!(st.fully_drained(), "nothing this build can see is pending");
         assert!(!st.safe_to_replace(), "but it is still not safe to destroy");
+        assert_eq!(st.first_unparsed, Some(2));
 
         let (outcome, _) = open_review(&log, "r2", "worktree", None, false).unwrap();
         assert_eq!(outcome, Opened::Attached);
         assert!(std::fs::read_to_string(log.path())
             .unwrap()
-            .contains("from a newer build"));
+            .contains("half a li"));
     }
 
     #[test]

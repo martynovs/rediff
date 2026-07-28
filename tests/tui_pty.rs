@@ -35,6 +35,15 @@ fn drive_theme_commit(xdg: &Path) -> bool {
     f.commit_all("init");
     f.write("a.rs", "fn main() {\n    one();\n    two();\n}\n");
 
+    // t = open theme picker; j/l = navigate (live-preview); Enter = commit the
+    // theme (persists it); q = quit the now-normal view.
+    drive(f.path(), Some(xdg), &[b"t", b"j", b"l", b"\r", b"q"])
+}
+
+/// Launch the viewer on a PTY over `repo`, send `keys` with a pause between
+/// each, and wait for a clean exit. Returns whether the child exited cleanly;
+/// panics (after killing the child) if it hangs, so the suite never stalls.
+fn drive(repo: &Path, xdg: Option<&Path>, keys: &[&[u8]]) -> bool {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -51,10 +60,12 @@ fn drive_theme_commit(xdg: &Path) -> bool {
     for (k, v) in std::env::vars() {
         cmd.env(k, v);
     }
-    cmd.env("XDG_CONFIG_HOME", xdg);
+    if let Some(xdg) = xdg {
+        cmd.env("XDG_CONFIG_HOME", xdg);
+    }
     cmd.arg("diff");
     cmd.arg("-C");
-    cmd.arg(f.path());
+    cmd.arg(repo);
 
     let mut child = pair.slave.spawn_command(cmd).expect("spawn on pty");
     // Drop the slave so the master sees EOF once the child exits.
@@ -86,9 +97,7 @@ fn drive_theme_commit(xdg: &Path) -> bool {
     })
     .expect("the TUI rendered an initial frame");
 
-    // t = open theme picker; j/l = navigate (live-preview); Enter = commit the
-    // theme (persists it); q = quit the now-normal view.
-    for key in [&b"t"[..], &b"j"[..], &b"l"[..], &b"\r"[..], &b"q"[..]] {
+    for key in keys {
         std::thread::sleep(Duration::from_millis(250));
         writer.write_all(key).expect("write key");
         writer.flush().expect("flush key");
@@ -150,6 +159,63 @@ fn tui_theme_commit_survives_a_save_failure() {
         "the bogus XDG path stays a file (no config was written)"
     );
 }
+
+/// The whole point of the review loop: a comment typed in the TUI comes back
+/// out of `rediff feedback`, anchored to the line it was left on.
+///
+/// This is the only test that proves the two halves meet. Every other test
+/// covers one side of the log — this one writes through the real key router,
+/// terminal and all, and reads through the real agent-facing command.
+#[test]
+fn a_comment_left_in_the_tui_is_delivered_by_feedback() {
+    let f = GitFixture::new();
+    f.write("a.rs", "fn main() {\n    one();\n}\n");
+    f.commit_all("init");
+    f.write("a.rs", "fn main() {\n    one();\n    two();\n}\n");
+
+    // ] lands on the first hunk, j steps onto a diff line, a opens the comment
+    // input; then the text, Enter to record, q to quit.
+    let keys: [&[u8]; 6] = [b"]", b"j", b"a", TEXT_STR.as_bytes(), b"\r", b"q"];
+    assert!(drive(f.path(), None, &keys), "the TUI exited cleanly");
+
+    let log = f.path().join("rediff.jsonl");
+    assert!(
+        log.is_file(),
+        "the comment opened a review log at the worktree root"
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rediff"))
+        .args(["feedback"])
+        .current_dir(f.path())
+        .output()
+        .expect("run rediff feedback");
+    assert!(out.status.success(), "feedback exited cleanly");
+    let json = String::from_utf8_lossy(&out.stdout);
+
+    let doc: serde_json::Value = serde_json::from_str(&json).expect("feedback emits JSON");
+    let threads = doc["threads"].as_array().expect("a threads array");
+    assert_eq!(threads.len(), 1, "exactly the comment we left: {json}");
+    let t = &threads[0];
+    assert_eq!(
+        t["body"].as_str(),
+        Some(TEXT_STR),
+        "the body arrives verbatim: {json}"
+    );
+    let anchor = &t["anchor"];
+    assert_eq!(anchor["path"].as_str(), Some("a.rs"), "{json}");
+    assert!(
+        anchor["quote"].as_str().is_some_and(|q| !q.is_empty()),
+        "the anchor quotes the line it was left on: {json}"
+    );
+    assert!(
+        anchor["line"].as_u64().is_some(),
+        "and names its line number: {json}"
+    );
+}
+
+/// The comment typed into the TUI. Written in one go: crossterm turns the bytes
+/// into one key event per character, which is what the input sees either way.
+const TEXT_STR: &str = "needs a test";
 
 /// Poll `cond` until it is true or `timeout` elapses.
 fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> Result<(), ()> {

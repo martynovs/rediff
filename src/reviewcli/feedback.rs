@@ -237,18 +237,17 @@ mod tests {
             at: crate::review::now(),
         }))
         .unwrap();
-        // A record from a build that knows more than this one.
+        // A line this build cannot read at all — torn by a crash mid-append.
+        // (A *well-formed* record from a newer rediff now reads as
+        // `Record::Unknown` and is deliberately not counted unparsed; damage is
+        // the case that still has to stop a drain.)
         {
             use std::io::Write as _;
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
                 .open(log.path())
                 .unwrap();
-            writeln!(
-                f,
-                r#"{{"t":"reply","id":"rp1","body":"from a newer rediff"}}"#
-            )
-            .unwrap();
+            writeln!(f, r#"{{"t":"thread","id":"rp1","body":"half a li"#).unwrap();
         }
 
         let st = log.state().unwrap();

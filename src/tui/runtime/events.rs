@@ -81,6 +81,9 @@ pub fn run(
     // to `config.toml` takes effect on the next launch without another argument
     // on a signature that already has eight.
     app.verdicts = crate::config::Config::load().verdicts();
+    // Once, at launch. Restoring mid-session would collapse files under the user
+    // in the middle of reading them.
+    app.restore_viewed();
     app.begin_load(stubs, false);
 
     let mut terminal = setup_terminal()?;
