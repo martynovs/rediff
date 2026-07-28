@@ -1,7 +1,11 @@
 # review stream
 
-## Requirements
+## Purpose
+The single scrollable stream that presents every file's diff as one document — windowed so only what
+is on screen is rendered, and able to show a file whose diff has not arrived yet without pretending
+it is empty.
 
+## Requirements
 ### Requirement: Single multi-file review stream
 The system SHALL render all changed files as one continuous top-to-bottom review stream in the
 changeset's file order.

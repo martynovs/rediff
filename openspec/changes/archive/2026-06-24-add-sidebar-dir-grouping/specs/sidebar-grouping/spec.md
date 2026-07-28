@@ -34,18 +34,21 @@ session (it is not per file or per view), and the directory-grouped view SHALL b
 - **THEN** the `D` directory-grouping toggle is listed
 
 ### Requirement: Directory lines are informative only
-In the grouped view, directory lines SHALL NOT be selectable and SHALL NOT carry
+In the grouped view, a directory line SHALL NOT be selectable and SHALL NOT carry
 a jump digit; selection, file-step navigation, and the `1–9` jump digits SHALL
-operate on files only. The active-file selection and its position SHALL be
-unaffected by whether the sidebar is grouped.
+skip them. The active-file selection and its position SHALL be unaffected by
+whether the sidebar is grouped.
+
+(A folded directory's *placeholder* is a distinct, selectable row — see
+`directory-collapse`. This requirement is about the directory header line.)
 
 #### Scenario: Navigation skips directory lines
 - **WHEN** the user steps the selection with `j`/`k` (or `{`/`}`) in the grouped view
-- **THEN** the selection moves from file to file; directory lines are never selected
+- **THEN** the selection moves between selectable rows; directory header lines are never selected
 
-#### Scenario: Jump digits address files
+#### Scenario: Jump digits skip directory lines
 - **WHEN** the grouped sidebar shows directory lines interleaved with files
-- **THEN** the `1–9` jump digits are spread across the visible files only, and pressing a digit jumps to that file
+- **THEN** the `1–9` jump digits are spread across the selectable rows only, and pressing a digit jumps to that row
 
 #### Scenario: Grouping does not move the cursor
 - **WHEN** the user toggles grouping while a file is selected

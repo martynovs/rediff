@@ -1,7 +1,11 @@
 # commit navigation
 
-## Requirements
+## Purpose
+Moving between what is under review: the in-TUI commit picker and its filters, the file-scoped log,
+and the browser-style view history that makes stepping into a commit and back a navigation rather
+than a restart.
 
+## Requirements
 ### Requirement: In-TUI commit picker
 The system SHALL provide a commit picker overlay, opened with `c`, that lists recent commits (capped at a fixed limit) with number shortcuts, mirroring the fuzzy file palette. Selecting a commit SHALL switch the current view to that commit's changes (the diff between the commit and its parent).
 
@@ -105,3 +109,23 @@ On switching the current view, the system SHALL discard cached highlight results
 #### Scenario: UI stays responsive during re-highlight
 - **WHEN** a view switch triggers re-highlighting
 - **THEN** the new diff is shown immediately and colors arrive asynchronously
+
+### Requirement: Read a commit's message from the picker
+The commit picker SHALL let the user read the full message of the highlighted commit before picking it: pressing `Tab` SHALL open the shared commit-message popup for the highlighted commit. The picker's existing `Enter` and number-shortcut selection SHALL continue to switch to the commit directly without first opening the popup.
+
+#### Scenario: Tab opens the highlighted commit's message
+- **WHEN** the commit picker is open and the user presses `Tab` with a commit highlighted
+- **THEN** the commit-message popup opens for that commit, over the picker
+
+#### Scenario: Confirm from the popup picks the commit
+- **WHEN** the commit-message popup is open from the picker and the user confirms it
+- **THEN** the view switches to that commit's diff
+
+#### Scenario: Dismiss returns to the picker
+- **WHEN** the commit-message popup is open from the picker and the user dismisses it
+- **THEN** the picker is shown again with the same query, results, and highlight
+
+#### Scenario: Enter still picks directly
+- **WHEN** the picker is open and the user presses `Enter` (or a number shortcut)
+- **THEN** the view switches to that commit directly, without opening the message popup
+

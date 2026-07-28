@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Commit-message popup is a routed overlay
-The commit-message popup SHALL participate in the single-active-overlay model as a transient overlay layered over a retained base. While it is open it SHALL be the active context: keyboard input SHALL route to it and mouse events SHALL NOT leak through to the context beneath it. It SHALL be opened over a retained base (the commit picker overlay or the blame peek) and dismissing it SHALL return to that exact base. At most one overlay SHALL be shown at a time, so opening the popup replaces — never visually stacks on — the picker it was summoned from.
+The commit-message popup SHALL be a transient overlay in the overlay stack, layered over a retained base. While it is open it SHALL be the active context: keyboard input SHALL route to it and mouse events SHALL NOT leak through to the context beneath it. It SHALL be opened over a retained base (the commit picker overlay or the blame peek) and dismissing it SHALL return to that exact base. Only the topmost overlay is drawn, so opening the popup covers — never visually stacks on — the picker it was summoned from.
 
 #### Scenario: Keyboard routes to the popup
 - **WHEN** the commit-message popup is open and the user presses a key

@@ -758,12 +758,27 @@ mod tests {
 
     #[test]
     fn staged_stubs_empty_when_index_matches_head() {
-        // A clean repo (the crate's own checkout) has nothing staged: the loop
-        // body never runs and an empty enumeration comes back.
-        let repo = gix::discover(fixture()).unwrap();
+        // Its own repo, deliberately: this used to run against the crate's
+        // checkout, so it failed for anyone who happened to have something
+        // staged — including this suite's own `git mv`-based fixtures and any
+        // contributor running tests mid-commit. A test whose result depends on
+        // the developer's index is a landmine, not a check.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = git_runner(dir.path());
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.t"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+
+        // Index matches HEAD: the loop body never runs, and an empty
+        // enumeration comes back.
+        let repo = gix::discover(dir.path()).unwrap();
         let en = staged_stubs(&repo).unwrap();
         assert_eq!(en.source, "staged");
-        assert!(en.stubs.is_empty(), "no staged changes in a clean checkout");
+        assert!(en.stubs.is_empty(), "nothing staged, nothing enumerated");
     }
 
     #[test]

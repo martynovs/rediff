@@ -1,7 +1,11 @@
 # file peek
 
-## Requirements
+## Purpose
+The modal single-file view layered over the stream — the whole file, its diff at adjustable context,
+or its blame — so a file can be read in full without losing the reader's place in the review, and
+without becoming an entry in the view history.
 
+## Requirements
 ### Requirement: Peek loads its own file during streaming
 The single-file peek SHALL source the peeked file's content directly from git (by path and the view's base/new refs) rather than from the changeset's cached text, so that preview and diff work on any file the moment the file list appears — even before that file's bulk diff has run.
 
@@ -29,15 +33,19 @@ The system SHALL provide a modal, full-area, scrollable, syntax-highlighted over
 - **THEN** its content is syntax-highlighted and can be scrolled independently of the main view
 
 ### Requirement: Content and diff modes
-The peek SHALL have two modes — content (the whole file, no diff markers) and diff (a unified diff for the file) — and Tab SHALL toggle between them in place.
+The peek SHALL have three modes — content (the whole file, no diff markers), diff (a unified diff for the file), and blame (the whole file with a per-line commit-attribution gutter) — and Tab SHALL cycle through them in place.
 
-#### Scenario: Toggle modes
+#### Scenario: Cycle modes
 - **WHEN** the user presses Tab in the peek
-- **THEN** the peek switches between showing the full file content and showing the file's diff
+- **THEN** the peek advances through content, diff, and blame and wraps back to content
 
 #### Scenario: Content mode shows the whole file
 - **WHEN** the peek is in content mode
 - **THEN** every line of the file is shown with line numbers and highlighting and no add/remove markers
+
+#### Scenario: Blame mode shows attribution
+- **WHEN** the peek is in blame mode
+- **THEN** every line of the file is shown with its committed-rev attribution gutter in place of the line numbers
 
 ### Requirement: History and review open keys
 The system SHALL open the peek from the selected file with two keys whose diffs share the same end point (`TOP`, the newest side of the current review context) but differ in start point:
@@ -77,3 +85,19 @@ The peek SHALL inherit the origin view's source accent: blue when opened from a 
 #### Scenario: Commit origin is the commit accent
 - **WHEN** the peek is opened from a commit or range view
 - **THEN** its frame uses the commit accent
+
+### Requirement: Open blame directly
+The system SHALL open the peek for the selected file directly in blame mode with `b`, from either focus, so blame is reachable in one key without first opening the peek and cycling modes. The peek opened this way SHALL otherwise behave as the modal single-file peek (ephemeral, no view-history entry, restoring the previous view on close).
+
+#### Scenario: b opens blame
+- **WHEN** the user presses `b` with a file selected
+- **THEN** the peek opens for that file in blame mode
+
+#### Scenario: Close restores the previous view
+- **WHEN** the user closes a blame peek opened with `b`
+- **THEN** the previous view is shown exactly as before and the view-history state is unchanged
+
+#### Scenario: Inert on a collapsed placeholder
+- **WHEN** the cursor is on a collapsed directory placeholder rather than a file and the user presses `b`
+- **THEN** nothing is opened
+

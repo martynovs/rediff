@@ -1,7 +1,11 @@
 # layout modes
 
-## Requirements
+## Purpose
+How a diff is laid out: unified (stacked) or side-by-side (split), chosen automatically from the
+terminal's width and overridable explicitly, so a narrow terminal is never handed a layout it cannot
+render honestly.
 
+## Requirements
 ### Requirement: Layout modes
 The system SHALL support `auto`, `split`, and `stack` layout modes for displaying diffs.
 

@@ -1,7 +1,11 @@
 # streaming diff load
 
-## Requirements
+## Purpose
+Loading a diff without making the user wait for it: the file list appears instantly and the per-file
+diffs stream in behind it, with progress shown only when a load is slow enough to warrant it, and
+cancellable throughout.
 
+## Requirements
 ### Requirement: Instant file list
 The system SHALL show the list of changed files (the sidebar) before any file's diff has been computed, by enumerating paths and statuses without reading blob contents.
 

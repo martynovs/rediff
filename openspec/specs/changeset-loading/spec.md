@@ -1,7 +1,11 @@
 # changeset loading
 
-## Requirements
+## Purpose
+How a changeset is produced from git: the working tree, the index, a commit, a range, and a single
+file for the peek — enumerated first and diffed after, with renames decoded and hunks that match what
+git itself would show, so every surface downstream reads one faithful model.
 
+## Requirements
 ### Requirement: Load working-tree changes
 The system SHALL load the git working-tree changes for `rediff diff` into one normalized
 changeset of files and hunks, including staged and unstaged modifications and untracked files.
@@ -162,3 +166,24 @@ whether the file is ignored by git. The omission SHALL NOT be configurable.
 #### Scenario: Similarly named files are unaffected
 - **WHEN** a changeset is loaded and the working tree contains a changed file named `rediff.jsonl` in a subdirectory, or a file whose name merely contains that string
 - **THEN** those files appear in the changeset as usual, and only the log at the worktree root is omitted
+
+### Requirement: Stable path ordering
+The system SHALL order a changeset's files by their parent directory and then by
+file name, applied once at enumeration so it holds for every load path
+(working-tree, staged, commit, and range). Files in the same directory SHALL be
+contiguous, and the order SHALL be stable rather than git's enumeration order.
+The ordering SHALL be applied before the streaming diff load begins, so it does
+not change which file each streamed diff is installed into.
+
+#### Scenario: Files in a directory are contiguous
+- **WHEN** a changeset touches several files in one directory and files in its subdirectories
+- **THEN** the directory's own files appear consecutively, ordered by name, with subdirectory files grouped under their own directories
+
+#### Scenario: Ordering is stable across load kinds
+- **WHEN** the same set of changed files is loaded via a working-tree diff and via a commit
+- **THEN** the files appear in the same parent-directory-then-name order in both
+
+#### Scenario: Streaming load stays aligned
+- **WHEN** the changeset is ordered at enumeration and the per-file diffs stream in
+- **THEN** each diff is installed into its file's position and the file list order does not shift as diffs arrive
+

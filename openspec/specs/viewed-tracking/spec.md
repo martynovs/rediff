@@ -1,7 +1,11 @@
 # viewed tracking
 
-## Requirements
+## Purpose
+Marking files as read during a review — the mark itself, collapsing what has been read, moving to
+what has not, and keeping that state per view and, once a review is open, across sessions — so a long
+changeset can be worked through in more than one sitting.
 
+## Requirements
 ### Requirement: Mark files reviewed
 The system SHALL let the user mark a file as reviewed and unmark it, and SHALL show each file's
 reviewed state in the sidebar.
