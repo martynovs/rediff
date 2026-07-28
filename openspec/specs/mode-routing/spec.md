@@ -5,15 +5,30 @@ A single active input context — a base (normal stream/sidebar or the file peek
 
 ## Requirements
 ### Requirement: Single active input mode
-The system SHALL track a single active input context that determines how keyboard and mouse input is routed. That context is a base (the normal stream — focused on the diff or the sidebar — or the file peek) with at most one transient overlay (the fuzzy palette or help) layered on top. When an overlay is present it is the active context; otherwise the base is. Keyboard and mouse routing SHALL derive from this same context, with one precedence, so the two input paths never disagree about which context is active.
+The system SHALL track a single active input context that determines how keyboard and mouse input is
+routed. That context is a base (the normal stream — focused on the diff or the sidebar — or the file
+peek) with a **stack** of transient overlays layered on top. The topmost overlay is the active
+context; with no overlays, the base is. Keyboard and mouse routing SHALL derive from this same
+context, with one precedence, so the two input paths never disagree about which context is active.
+
+Dismissing the topmost overlay SHALL reveal the one beneath it, exactly as it was, and dismissing the
+last SHALL restore the base unchanged. An overlay MAY be opened from another overlay.
 
 #### Scenario: Keyboard routes to the active overlay
-- **WHEN** an overlay (the palette or help) is open and the user presses a key
+- **WHEN** an overlay is open and the user presses a key
 - **THEN** the key is interpreted by that overlay's bindings, not the base's
 
 #### Scenario: Mouse does not leak through an overlay
-- **WHEN** the fuzzy palette or help overlay is open and the user scrolls the wheel or clicks
+- **WHEN** an overlay is open and the user scrolls the wheel or clicks
 - **THEN** the event is handled by (or absorbed for) the active overlay and does not scroll or select within the diff behind it
+
+#### Scenario: An overlay opened from an overlay returns to it
+- **WHEN** an overlay is opened while another is shown, and then dismissed
+- **THEN** the overlay beneath is shown again, exactly as it was
+
+#### Scenario: Dismissing the last overlay restores the base
+- **WHEN** the only overlay is dismissed
+- **THEN** the base view is shown exactly as it was
 
 ### Requirement: Overlays layer over a retained base
 An overlay (the palette or help) SHALL be opened over a base context that is retained while the overlay is active, so the overlay's mode-dependent content reflects that base and closing the overlay returns to it. The help overlay in particular SHALL present the bindings of the base it was opened over.
@@ -52,9 +67,34 @@ The keybindings SHALL be defined in one place, and the status-line hints and the
 - **THEN** the keys it lists are the keys the active routing actually handles
 
 ### Requirement: Exactly one overlay is shown
-At most one overlay (peek, palette, or help) SHALL be displayed at a time, selected by the active mode, so overlays cannot visually stack and input precedence cannot disagree with what is drawn.
+The **topmost** overlay SHALL be the one displayed, selected by the active context, so what is drawn
+always matches what is receiving input. Overlays beneath it SHALL NOT be drawn.
 
-#### Scenario: Opening an overlay replaces, never stacks
-- **WHEN** the active mode is an overlay mode
-- **THEN** only that overlay is rendered over the body, and it is the overlay receiving input
+#### Scenario: Opening an overlay draws it over the one below
+- **WHEN** an overlay is opened while another is already active
+- **THEN** only the new overlay is rendered over the body, and it is the overlay receiving input
 
+### Requirement: Review overlays join the stack
+The comment input, the thread list, and the round-closing overlay SHALL be overlays in that stack,
+and editing a thread from the thread list SHALL push the input over it and return to the list on
+dismissal.
+
+#### Scenario: Editing from the list returns to the list
+- **WHEN** the user edits a thread from the thread list and dismisses the input
+- **THEN** the thread list is shown again
+
+#### Scenario: A multi-stage overlay steps back before closing
+- **WHEN** the user dismisses an overlay that has advanced past its first stage
+- **THEN** it returns to the previous stage rather than closing, so a mistyped dismissal costs a step and not the work in progress
+
+### Requirement: The help overlay scrolls when it does not fit
+The help overlay SHALL let the user scroll its content when the terminal cannot show all of it, and
+SHALL say so. Any key that is not a scroll key SHALL still dismiss it.
+
+#### Scenario: Content beyond the box is reachable
+- **WHEN** the help catalog is taller than the terminal allows
+- **THEN** the user can scroll to the content below the fold, and the overlay says that scrolling is available
+
+#### Scenario: Any other key still closes it
+- **WHEN** the user presses a key that is not a scroll key while help is open
+- **THEN** the overlay closes, as it does when the whole catalog fits

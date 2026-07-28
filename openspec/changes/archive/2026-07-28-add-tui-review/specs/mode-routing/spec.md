@@ -37,9 +37,26 @@ always matches what is receiving input. Overlays beneath it SHALL NOT be drawn.
 ## ADDED Requirements
 
 ### Requirement: Review overlays join the stack
-The comment input and the thread list SHALL be overlays in that stack, and editing a thread from the
-thread list SHALL push the input over it and return to the list on dismissal.
+The comment input, the thread list, and the round-closing overlay SHALL be overlays in that stack,
+and editing a thread from the thread list SHALL push the input over it and return to the list on
+dismissal.
 
 #### Scenario: Editing from the list returns to the list
 - **WHEN** the user edits a thread from the thread list and dismisses the input
 - **THEN** the thread list is shown again
+
+#### Scenario: A multi-stage overlay steps back before closing
+- **WHEN** the user dismisses an overlay that has advanced past its first stage
+- **THEN** it returns to the previous stage rather than closing, so a mistyped dismissal costs a step and not the work in progress
+
+### Requirement: The help overlay scrolls when it does not fit
+The help overlay SHALL let the user scroll its content when the terminal cannot show all of it, and
+SHALL say so. Any key that is not a scroll key SHALL still dismiss it.
+
+#### Scenario: Content beyond the box is reachable
+- **WHEN** the help catalog is taller than the terminal allows
+- **THEN** the user can scroll to the content below the fold, and the overlay says that scrolling is available
+
+#### Scenario: Any other key still closes it
+- **WHEN** the user presses a key that is not a scroll key while help is open
+- **THEN** the overlay closes, as it does when the whole catalog fits

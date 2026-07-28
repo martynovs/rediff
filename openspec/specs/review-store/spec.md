@@ -65,8 +65,12 @@ caller asks to keep it. A review that recorded no feedback at all is vacuously f
 - **THEN** the new `open` record is appended and the previous review's records are retained
 
 #### Scenario: A log this build cannot fully read is never replaced
-- **WHEN** a review is opened and the log contains lines that do not parse, such as a record type written by a newer version
+- **WHEN** a review is opened and the log contains lines that do not parse, such as a line torn by a crash mid-append
 - **THEN** the log is not replaced, because unreadable is not the same as empty
+
+#### Scenario: A record type from a newer version does not pin the log
+- **WHEN** a review is opened and the log's only unfamiliar content is a well-formed record whose type this build does not know
+- **THEN** the log may still be replaced, because a record this build can read and knows to ignore is not damage
 
 #### Scenario: A retracted thread does not block finishing
 - **WHEN** every thread in a review has been retracted and nothing else is pending
@@ -289,3 +293,41 @@ whole line, so that no two records interleave within a line and no record is tru
 #### Scenario: Two writers append at once
 - **WHEN** two writers append records to the same log concurrently
 - **THEN** every line in the resulting log parses as a complete record and no record is lost or split
+
+### Requirement: Unknown record types are tolerated, not counted as damage
+The system SHALL read a well-formed record whose type it does not recognize as a known-unknown: it
+SHALL be ignored when folding the log, SHALL still consume its ordinal, and SHALL NOT count toward
+the lines the build could not read. A line that is not well-formed at all — torn by a crash, or
+corrupt — SHALL still count as unreadable.
+
+Because an older build silently ignores what it does not recognize, every record type added after
+this SHALL be inert when folded: it SHALL NOT be feedback, and SHALL NOT be the only thing standing
+between the log and replacement.
+
+#### Scenario: A record from a newer version folds to nothing
+- **WHEN** the log contains a well-formed record whose type this build does not know
+- **THEN** it contributes nothing to the review's state, consumes its ordinal, and does not make the log unreadable
+
+#### Scenario: A torn line is still damage
+- **WHEN** the log contains a line that is not valid JSON, such as a record truncated mid-append
+- **THEN** that line counts as unreadable and the log is not replaced
+
+### Requirement: Reviewed files are recorded with the review
+The system SHALL record which files the user has marked reviewed as a whole-set snapshot of paths,
+belonging to the review that is open. It SHALL record nothing when no review is open, and nothing
+when the open review is over a different target. Restoration SHALL match files by path, since a
+changeset's file order may differ between sessions. The record SHALL be inert when folded: it is
+not feedback, so it neither pins the review against replacement nor gives a consumer anything to
+drain.
+
+#### Scenario: The latest snapshot wins
+- **WHEN** several reviewed-files records exist in one review
+- **THEN** the most recent one is the review's reviewed set
+
+#### Scenario: Reviewed state does not survive a new review
+- **WHEN** a new review is opened
+- **THEN** its reviewed set starts empty rather than inheriting the previous review's
+
+#### Scenario: Recording reviewed files does not create work for a consumer
+- **WHEN** a review's only records since the last drain are reviewed-files records
+- **THEN** a drain has nothing to deliver and the review still counts as finished

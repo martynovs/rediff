@@ -1,5 +1,11 @@
-## ADDED Requirements
+# tui-review Specification
 
+## Purpose
+Capturing review points from inside the diff viewer the human is already reading in — commenting on
+the line under the cursor, seeing what has been said, revising it, and closing the round — so the
+review a human performs and the feedback an agent drains are the same act rather than two.
+
+## Requirements
 ### Requirement: Comment on the line under the cursor
 The system SHALL let the user comment on the diff line the cursor is on, anchoring the comment to
 that file, side, and line number, and recording it in the worktree's review log. The anchor SHALL
@@ -120,17 +126,34 @@ provide a list of the review's threads from which the user can jump to a thread'
 - **WHEN** a thread's anchor no longer resolves in the current diff
 - **THEN** it still appears in the list, marked as detached, rather than vanishing
 
+#### Scenario: A thread in a file still loading is not called detached
+- **WHEN** a thread is anchored in a file whose diff has not yet arrived
+- **THEN** the list reports it as still resolving rather than as detached, since telling the user their code is gone would be false
+
 ### Requirement: Edit, retract, and resolve
 The system SHALL let the user change a thread's text, retract it, and mark it resolved. Each SHALL be
-recorded as a new entry rather than by altering what was already written.
+recorded as a new entry rather than by altering what was already written, and SHALL preserve every
+part of the thread it does not change.
+
+Retraction and resolution SHALL both be reversible from within the review, and a retracted thread
+SHALL remain visible in the thread list — otherwise a single keystroke would put a review point
+beyond the user's reach while leaving it in the log.
 
 #### Scenario: Editing supersedes
 - **WHEN** the user changes a thread's text
 - **THEN** the thread reads as the new text and the earlier entry is retained in the log
 
+#### Scenario: Editing preserves the rest of the thread
+- **WHEN** the user changes the text of a thread that is anchored and marked resolved
+- **THEN** it is still anchored to the same line and still marked resolved
+
 #### Scenario: Retracting withdraws from delivery
 - **WHEN** the user retracts a thread
 - **THEN** it is not delivered to a consumer, and the log still contains both entries
+
+#### Scenario: A retraction can be undone
+- **WHEN** the user retracts a thread and then retracts it again
+- **THEN** it is delivered once more, and the thread list showed it throughout so it could be reached
 
 #### Scenario: Resolving keeps the thread
 - **WHEN** the user marks a thread resolved
